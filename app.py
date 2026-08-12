@@ -245,6 +245,7 @@ def fetch_and_display():
             st.dataframe(
                 data[["RSI_9", "RSI_EMA_3", "RSI_WMA_21"]]
                 .tail(15).sort_index(ascending=False)
+                .style.format("{:.2f}")
             )
 
         st.caption(f"Last updated: {pd.Timestamp.now()}")
@@ -350,11 +351,15 @@ def get_scanner_signal(rsi, price, wma):
 
 
 def style_signal_rows(df):
-    """Colour every row's text based on its Signal column (for on-screen display)."""
+    """Colour every row's text based on its Signal column, and show all
+    numeric values rounded to exactly 2 decimal places (for on-screen display)."""
     def _apply(row):
         color = SIGNAL_COLORS_DISPLAY.get(row.get("Signal", "WAIT"), "#FFFFFF")
         return [f"color: {color}"] * len(row)
-    return df.style.apply(_apply, axis=1)
+
+    numeric_cols = df.select_dtypes(include="number").columns
+    fmt = {col: "{:.2f}" for col in numeric_cols}
+    return df.style.apply(_apply, axis=1).format(fmt)
 
 
 def scan_symbols(symbols, yf_suffix=".NS", interval="1d"):
@@ -500,11 +505,17 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
     def color_code_sheet(worksheet, df):
         if "Signal" not in df.columns:
             return
+        numeric_col_idxs = [
+            i + 1 for i, col in enumerate(df.columns)
+            if pd.api.types.is_numeric_dtype(df[col])
+        ]
         for row_idx, signal in enumerate(df["Signal"], start=2):  # row 1 = header
             color = SIGNAL_COLORS_EXCEL.get(signal, "#000000").lstrip("#")
             for col_idx in range(1, len(df.columns) + 1):
                 cell = worksheet.cell(row=row_idx, column=col_idx)
                 cell.font = Font(color=color)
+                if col_idx in numeric_col_idxs:
+                    cell.number_format = "0.00"
 
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
