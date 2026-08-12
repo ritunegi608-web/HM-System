@@ -288,9 +288,47 @@ def get_nifty500_symbols():
         return FALLBACK_SYMBOLS
 
 
-def scan_symbols(symbols, yf_suffix=".NS"):
-    """Batch-fetch daily data and compute Latest Price, RSI(9),
-    EMA(3) of RSI, and WMA(21) of RSI for each symbol."""
+# Shared signal -> color mapping (hex, used for both on-screen table and Excel)
+SIGNAL_COLORS = {
+    "BUY": "#008000",                        # green
+    "SELL": "#FF0000",                       # red
+    "CORRECTION/SHORT COVERING": "#0000FF",  # blue
+    "WAIT": "#000000",                       # black
+}
+
+
+def get_scanner_signal(rsi, price, wma):
+    """
+    PRICE here = EMA(3) of RSI (same 0-100 scale as RSI and WMA-of-RSI,
+    consistent with the main chart's RSI-based signal lines).
+    BUY: RSI > 50 and RSI > PRICE > WMA
+    SELL: RSI < 50 and WMA > PRICE > RSI
+    CORRECTION/SHORT COVERING: RSI < 50 and RSI > PRICE > WMA
+    """
+    if pd.isna(rsi) or pd.isna(price) or pd.isna(wma):
+        return "WAIT"
+    if rsi > 50 and rsi > price > wma:
+        return "BUY"
+    elif rsi < 50 and wma > price > rsi:
+        return "SELL"
+    elif rsi < 50 and rsi > price > wma:
+        return "CORRECTION/SHORT COVERING"
+    else:
+        return "WAIT"
+
+
+def style_signal_rows(df):
+    """Colour every row's text based on its Signal column (for on-screen display)."""
+    def _apply(row):
+        color = SIGNAL_COLORS.get(row.get("Signal", "WAIT"), "#000000")
+        return [f"color: {color}"] * len(row)
+    return df.style.apply(_apply, axis=1)
+
+
+def scan_symbols(symbols, yf_suffix=".NS", interval="1d"):
+    """Batch-fetch data (at the chosen timeframe) and compute Latest Price,
+    RSI(9), EMA(3) of RSI, WMA(21) of RSI and Signal for each symbol."""
+    cfg = INTERVAL_CONFIG[interval]
     tickers = [
         f"{s}{yf_suffix}" if yf_suffix and not str(s).startswith("^") else s
         for s in symbols
@@ -300,8 +338,8 @@ def scan_symbols(symbols, yf_suffix=".NS"):
     try:
         raw = yf.download(
             tickers=" ".join(tickers),
-            period="4mo",
-            interval="1d",
+            period=cfg["period"],
+            interval=cfg["yf_interval"],
             group_by="ticker",
             threads=True,
             progress=False,
@@ -321,6 +359,15 @@ def scan_symbols(symbols, yf_suffix=".NS"):
                 df = raw[tkr]
 
             df = df.dropna(how="all")
+
+            # Combine smaller candles into the requested bigger duration
+            # (same resample logic as the main single-stock chart)
+            if cfg["resample"]:
+                df = df.resample(cfg["resample"]).agg({
+                    "Open": "first", "High": "max", "Low": "min",
+                    "Close": "last", "Volume": "sum"
+                }).dropna(how="all")
+
             close = df["Close"].dropna()
             if len(close) < 10:
                 continue
@@ -338,12 +385,18 @@ def scan_symbols(symbols, yf_suffix=".NS"):
                 lambda v: np.dot(v, weights) / weights.sum(), raw=True
             )
 
+            latest_rsi = rsi.iloc[-1]
+            latest_ema = rsi_ema3.iloc[-1]
+            latest_wma = rsi_wma21.iloc[-1]
+            signal = get_scanner_signal(latest_rsi, latest_ema, latest_wma)
+
             rows.append({
                 "Symbol": sym,
                 "Latest Price": round(float(close.iloc[-1]), 2),
-                "RSI (9)": round(float(rsi.iloc[-1]), 2) if not pd.isna(rsi.iloc[-1]) else None,
-                "EMA(3) of RSI": round(float(rsi_ema3.iloc[-1]), 2) if not pd.isna(rsi_ema3.iloc[-1]) else None,
-                "WMA(21) of RSI": round(float(rsi_wma21.iloc[-1]), 2) if not pd.isna(rsi_wma21.iloc[-1]) else None,
+                "RSI (9)": round(float(latest_rsi), 2) if not pd.isna(latest_rsi) else None,
+                "EMA(3) of RSI": round(float(latest_ema), 2) if not pd.isna(latest_ema) else None,
+                "WMA(21) of RSI": round(float(latest_wma), 2) if not pd.isna(latest_wma) else None,
+                "Signal": signal,
             })
         except Exception:
             continue
@@ -354,22 +407,31 @@ def scan_symbols(symbols, yf_suffix=".NS"):
 st.divider()
 st.header("🔍 Market Scanner — Indexes & Nifty 500")
 st.caption(
-    "Daily-timeframe scan, separate from the live auto-refresh chart above. "
-    "Scanning 500+ stocks can take a few minutes and only refreshes when you "
-    "click the button (continuous live scanning of 500 stocks would get "
-    "rate-limited by Yahoo Finance)."
+    "Separate from the live auto-refresh chart above. Scanning 500+ stocks "
+    "can take a few minutes and only refreshes when you click the button "
+    "(continuous live scanning of 500 stocks would get rate-limited by "
+    "Yahoo Finance)."
+)
+
+scanner_interval = st.selectbox(
+    "Scanner Timeframe",
+    options=list(INTERVAL_CONFIG.keys()),
+    index=list(INTERVAL_CONFIG.keys()).index("1d"),
+    help="Data (and the Excel download) will be based on this timeframe."
 )
 
 if "scanner_index_df" not in st.session_state:
     st.session_state.scanner_index_df = None
 if "scanner_stocks_df" not in st.session_state:
     st.session_state.scanner_stocks_df = None
+if "scanner_interval_used" not in st.session_state:
+    st.session_state.scanner_interval_used = None
 
 if st.button("▶️ Run / Refresh Scanner"):
     with st.spinner("Scanning major indexes..."):
         index_names = list(MAJOR_INDEXES.keys())
         index_symbols = list(MAJOR_INDEXES.values())
-        idx_df = scan_symbols(index_symbols, yf_suffix="")
+        idx_df = scan_symbols(index_symbols, yf_suffix="", interval=scanner_interval)
         if not idx_df.empty:
             name_map = dict(zip(index_symbols, index_names))
             idx_df.insert(0, "Index", idx_df["Symbol"].map(name_map))
@@ -378,35 +440,55 @@ if st.button("▶️ Run / Refresh Scanner"):
 
     with st.spinner("Scanning Nifty 500 stocks (this can take a few minutes)..."):
         nifty500 = get_nifty500_symbols()
-        stocks_df = scan_symbols(nifty500, yf_suffix=".NS")
+        stocks_df = scan_symbols(nifty500, yf_suffix=".NS", interval=scanner_interval)
         st.session_state.scanner_stocks_df = stocks_df
 
+    st.session_state.scanner_interval_used = scanner_interval
+
 if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
+    st.caption(f"Data timeframe: **{st.session_state.scanner_interval_used}**")
+
     tab_all, tab_idx, tab_stocks = st.tabs(["All", "Indexes", "Nifty 500 Stocks"])
 
     with tab_idx:
-        st.dataframe(st.session_state.scanner_index_df, use_container_width=True)
+        st.dataframe(style_signal_rows(st.session_state.scanner_index_df), use_container_width=True)
 
     with tab_stocks:
-        st.dataframe(st.session_state.scanner_stocks_df, use_container_width=True)
+        st.dataframe(style_signal_rows(st.session_state.scanner_stocks_df), use_container_width=True)
 
     with tab_all:
         st.write("**Indexes**")
-        st.dataframe(st.session_state.scanner_index_df, use_container_width=True)
+        st.dataframe(style_signal_rows(st.session_state.scanner_index_df), use_container_width=True)
         st.write("**Nifty 500 Stocks**")
-        st.dataframe(st.session_state.scanner_stocks_df, use_container_width=True)
+        st.dataframe(style_signal_rows(st.session_state.scanner_stocks_df), use_container_width=True)
 
     # ---- Download as a single Excel file with 2 separate sheets ----
+    from openpyxl.styles import Font
+
+    def color_code_sheet(worksheet, df):
+        if "Signal" not in df.columns:
+            return
+        for row_idx, signal in enumerate(df["Signal"], start=2):  # row 1 = header
+            color = SIGNAL_COLORS.get(signal, "#000000").lstrip("#")
+            for col_idx in range(1, len(df.columns) + 1):
+                cell = worksheet.cell(row=row_idx, column=col_idx)
+                cell.font = Font(color=color)
+
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         st.session_state.scanner_index_df.to_excel(writer, sheet_name="Indexes", index=False)
         st.session_state.scanner_stocks_df.to_excel(writer, sheet_name="Nifty500_Stocks", index=False)
+        color_code_sheet(writer.sheets["Indexes"], st.session_state.scanner_index_df)
+        color_code_sheet(writer.sheets["Nifty500_Stocks"], st.session_state.scanner_stocks_df)
     excel_buffer.seek(0)
 
     st.download_button(
         label="⬇️ Download Excel (Indexes + Nifty 500 — 2 sheets)",
         data=excel_buffer,
-        file_name=f"market_scan_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        file_name=(
+            f"market_scan_{st.session_state.scanner_interval_used}_"
+            f"{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        ),
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 else:
