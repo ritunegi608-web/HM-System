@@ -44,6 +44,11 @@ refresh_seconds = st.sidebar.number_input(
     "Auto-refresh every (seconds)",
     min_value=10, max_value=300, value=30
 )
+num_bars = st.sidebar.slider(
+    "Candles to show on chart",
+    min_value=30, max_value=300, value=100,
+    help="Fewer candles = cleaner, less zig-zag chart (like TradingView's default zoomed view)"
+)
 run = st.sidebar.checkbox("Start Live Updates", value=True)
 
 
@@ -207,7 +212,7 @@ def fetch_and_display():
         col3.metric("21-WMA (Price)", f"{latest_wma:.2f}" if not pd.isna(latest_wma) else "N/A")
         col4.metric("9-RSI", f"{latest_rsi:.2f}" if not pd.isna(latest_rsi) else "N/A")
 
-        st.plotly_chart(build_chart(data), use_container_width=True)
+        st.plotly_chart(build_chart(data.tail(num_bars)), use_container_width=True)
 
         with st.expander("Raw Data (latest rows)"):
             st.dataframe(
