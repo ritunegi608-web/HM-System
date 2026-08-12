@@ -70,6 +70,13 @@ def calculate_indicators(df):
     rs = avg_gain / avg_loss
     df["RSI_9"] = 100 - (100 / (1 + rs))
 
+    # "Hilega Milega" style: EMA(3) and WMA(21) applied to the RSI itself
+    # (not to price) so both lines sit on the same 0-100 scale as RSI.
+    df["RSI_EMA_3"] = df["RSI_9"].ewm(span=3, adjust=False).mean()
+    df["RSI_WMA_21"] = df["RSI_9"].rolling(21).apply(
+        lambda vals: np.dot(vals, weights) / weights.sum(), raw=True
+    )
+
     return df
 
 
@@ -107,8 +114,8 @@ def build_chart(data):
     idx = data.index
     close = data["Close"]
     rsi = data["RSI_9"]
-    wma = data["WMA_21"]
-    ema = data["EMA_3"]
+    rsi_wma = data["RSI_WMA_21"]
+    rsi_ema = data["RSI_EMA_3"]
 
     # Masked series so the fill collapses to nothing on the "wrong" side of 50
     rsi_upper = rsi.clip(lower=50)
@@ -120,7 +127,6 @@ def build_chart(data):
         shared_xaxes=True,
         row_heights=[0.55, 0.45],
         vertical_spacing=0.04,
-        specs=[[{"secondary_y": False}], [{"secondary_y": True}]],
     )
 
     # ---- Upper section: only Last Traded Price ----
@@ -131,42 +137,41 @@ def build_chart(data):
 
     # ---- Lower section: RSI zones (orange above 50, light green below 50) ----
     fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
-                              hoverinfo="skip"), row=2, col=1, secondary_y=False)
+                              hoverinfo="skip"), row=2, col=1)
     fig.add_trace(go.Scatter(x=idx, y=rsi_upper, line=dict(width=0), fill="tonexty",
                               fillcolor="rgba(255,165,0,0.35)", name="Overbought (>50)",
-                              showlegend=True, hoverinfo="skip"), row=2, col=1, secondary_y=False)
+                              showlegend=True, hoverinfo="skip"), row=2, col=1)
     fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
-                              hoverinfo="skip"), row=2, col=1, secondary_y=False)
+                              hoverinfo="skip"), row=2, col=1)
     fig.add_trace(go.Scatter(x=idx, y=rsi_lower, line=dict(width=0), fill="tonexty",
                               fillcolor="rgba(144,238,144,0.35)", name="Oversold (<50)",
-                              showlegend=True, hoverinfo="skip"), row=2, col=1, secondary_y=False)
+                              showlegend=True, hoverinfo="skip"), row=2, col=1)
 
     # Midline at 50
     fig.add_trace(
         go.Scatter(x=idx, y=midline, mode="lines", line=dict(color="gray", width=1, dash="dot"),
-                   name="Midline (50)"), row=2, col=1, secondary_y=False
+                   name="Midline (50)"), row=2, col=1
     )
 
     # RSI line itself
     fig.add_trace(
         go.Scatter(x=idx, y=rsi, mode="lines", line=dict(color="white", width=1.8),
-                   name="RSI (9)"), row=2, col=1, secondary_y=False
+                   name="RSI (9)"), row=2, col=1
     )
 
-    # 21 WMA (red) and 3 EMA (violet) of price, plotted on their own scale
-    # in the same RSI section (like the "Hilega Milega" indicator)
+    # WMA(21) and EMA(3) of the RSI itself -- same 0-100 scale, like the
+    # "Hilega Milega" TradingView indicator (close, 9, 3, 21)
     fig.add_trace(
-        go.Scatter(x=idx, y=wma, mode="lines", line=dict(color="red", width=1.5),
-                   name="21 WMA (Price)"), row=2, col=1, secondary_y=True
+        go.Scatter(x=idx, y=rsi_wma, mode="lines", line=dict(color="red", width=1.5),
+                   name="21 WMA (of RSI)"), row=2, col=1
     )
     fig.add_trace(
-        go.Scatter(x=idx, y=ema, mode="lines", line=dict(color="violet", width=1.5),
-                   name="3 EMA (Price)"), row=2, col=1, secondary_y=True
+        go.Scatter(x=idx, y=rsi_ema, mode="lines", line=dict(color="violet", width=1.5),
+                   name="3 EMA (of RSI)"), row=2, col=1
     )
 
     fig.update_yaxes(title_text="Price", row=1, col=1)
-    fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="Price (EMA/WMA)", row=2, col=1, secondary_y=True, showgrid=False)
+    fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
 
     fig.update_layout(
         height=700,
@@ -198,15 +203,16 @@ def fetch_and_display():
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Latest Price", f"{latest_close:.2f}")
-        col2.metric("3-EMA", f"{latest_ema:.2f}")
-        col3.metric("21-WMA", f"{latest_wma:.2f}" if not pd.isna(latest_wma) else "N/A")
+        col2.metric("3-EMA (Price)", f"{latest_ema:.2f}")
+        col3.metric("21-WMA (Price)", f"{latest_wma:.2f}" if not pd.isna(latest_wma) else "N/A")
         col4.metric("9-RSI", f"{latest_rsi:.2f}" if not pd.isna(latest_rsi) else "N/A")
 
         st.plotly_chart(build_chart(data), use_container_width=True)
 
         with st.expander("Raw Data (latest rows)"):
             st.dataframe(
-                data[["Close", "EMA_3", "WMA_21", "RSI_9"]].tail(15).sort_index(ascending=False)
+                data[["Close", "EMA_3", "WMA_21", "RSI_9", "RSI_EMA_3", "RSI_WMA_21"]]
+                .tail(15).sort_index(ascending=False)
             )
 
         st.caption(f"Last updated: {pd.Timestamp.now()}")
