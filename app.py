@@ -117,7 +117,7 @@ def fetch_data(symbol, interval):
 
 
 # ---------- Chart (TradingView "Hilega Milega" style) ----------
-def build_chart(data):
+def build_chart(data, is_intraday=False):
     idx = data.index
     close = data["Close"]
     rsi = data["RSI_9"]
@@ -185,6 +185,15 @@ def build_chart(data):
     fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, fixedrange=True)
     fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
 
+    # Remove blank gaps for days/hours when the market is closed
+    # (weekends, and outside 9:15-15:30 for intraday candles) so
+    # scrolling left never lands on empty space.
+    rangebreaks = [dict(bounds=["sat", "mon"])]
+    if is_intraday:
+        rangebreaks.append(dict(bounds=[15.5, 9.25], pattern="hour"))
+    fig.update_xaxes(rangebreaks=rangebreaks, row=1, col=1)
+    fig.update_xaxes(rangebreaks=rangebreaks, row=2, col=1)
+
     fig.update_layout(
         height=700,
         template="plotly_dark",
@@ -221,7 +230,10 @@ def fetch_and_display():
         col4.metric("9-RSI", f"{latest_rsi:.2f}" if not pd.isna(latest_rsi) else "N/A")
 
         st.plotly_chart(
-            build_chart(data.tail(num_bars)),
+            build_chart(
+                data.tail(num_bars),
+                is_intraday=(interval in ["1m", "5m", "10m", "15m", "30m", "1h", "2h", "3h", "4h"])
+            ),
             use_container_width=True,
             config={
                 "scrollZoom": True,      # pinch (two-finger) to zoom in/out
