@@ -136,9 +136,13 @@ def build_chart(data):
         vertical_spacing=0.04,
     )
 
-    # ---- Upper section: only Last Traded Price ----
+    # ---- Upper section: Price as a candlestick chart ----
     fig.add_trace(
-        go.Scatter(x=idx, y=close, name="Price", line=dict(color="#00BFFF", width=1.6)),
+        go.Candlestick(
+            x=idx, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"],
+            name="Price",
+            increasing_line_color="#26A69A", decreasing_line_color="#EF5350"
+        ),
         row=1, col=1
     )
 
@@ -177,15 +181,17 @@ def build_chart(data):
                    name="3 EMA (of RSI)"), row=2, col=1
     )
 
-    fig.update_yaxes(title_text="Price", row=1, col=1)
-    fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
+    fig.update_yaxes(title_text="Price", row=1, col=1, fixedrange=True)
+    fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, fixedrange=True)
+    fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
 
     fig.update_layout(
         height=700,
         template="plotly_dark",
         hovermode="x unified",
         margin=dict(l=10, r=10, t=30, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        dragmode="pan",  # single-finger drag = scroll left/right, not a distorting zoom-box
     )
 
     return fig
@@ -214,7 +220,14 @@ def fetch_and_display():
         col3.metric("21-WMA (Price)", f"{latest_wma:.2f}" if not pd.isna(latest_wma) else "N/A")
         col4.metric("9-RSI", f"{latest_rsi:.2f}" if not pd.isna(latest_rsi) else "N/A")
 
-        st.plotly_chart(build_chart(data.tail(num_bars)), use_container_width=True)
+        st.plotly_chart(
+            build_chart(data.tail(num_bars)),
+            use_container_width=True,
+            config={
+                "scrollZoom": True,      # pinch (two-finger) to zoom in/out
+                "displayModeBar": False  # cleaner mobile view
+            }
+        )
 
         with st.expander("Raw Data (latest rows)"):
             st.dataframe(
@@ -289,11 +302,18 @@ def get_nifty500_symbols():
 
 
 # Shared signal -> color mapping (hex, used for both on-screen table and Excel)
-SIGNAL_COLORS = {
+SIGNAL_COLORS_EXCEL = {
     "BUY": "#008000",                        # green
     "SELL": "#FF0000",                       # red
     "CORRECTION/SHORT COVERING": "#0000FF",  # blue
-    "WAIT": "#000000",                       # black
+    "WAIT": "#000000",                       # black (in the downloaded Excel)
+}
+
+SIGNAL_COLORS_DISPLAY = {
+    "BUY": "#00FF00",                        # bright green (visible on dark bg)
+    "SELL": "#FF4B4B",                        # red
+    "CORRECTION/SHORT COVERING": "#4DA6FF",   # blue
+    "WAIT": "#FFFFFF",                        # white (so it's visible on the dashboard)
 }
 
 
@@ -320,7 +340,7 @@ def get_scanner_signal(rsi, price, wma):
 def style_signal_rows(df):
     """Colour every row's text based on its Signal column (for on-screen display)."""
     def _apply(row):
-        color = SIGNAL_COLORS.get(row.get("Signal", "WAIT"), "#000000")
+        color = SIGNAL_COLORS_DISPLAY.get(row.get("Signal", "WAIT"), "#FFFFFF")
         return [f"color: {color}"] * len(row)
     return df.style.apply(_apply, axis=1)
 
@@ -469,7 +489,7 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
         if "Signal" not in df.columns:
             return
         for row_idx, signal in enumerate(df["Signal"], start=2):  # row 1 = header
-            color = SIGNAL_COLORS.get(signal, "#000000").lstrip("#")
+            color = SIGNAL_COLORS_EXCEL.get(signal, "#000000").lstrip("#")
             for col_idx in range(1, len(df.columns) + 1):
                 cell = worksheet.cell(row=row_idx, column=col_idx)
                 cell.font = Font(color=color)
