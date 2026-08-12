@@ -67,14 +67,25 @@ def fetch_and_display():
             st.error("No data found. Check the symbol (e.g. use RELIANCE.NS for NSE stocks).")
             return
 
+        # Fix: newer yfinance versions can return multi-level columns
+        # even for a single ticker. Flatten them so values are plain numbers.
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
         data = calculate_indicators(data)
         latest = data.iloc[-1]
 
+        # Fix: force plain Python floats so formatting never breaks
+        latest_close = float(latest['Close'])
+        latest_ema = float(latest['EMA_3'])
+        latest_wma = float(latest['WMA_21']) if not pd.isna(latest['WMA_21']) else float('nan')
+        latest_rsi = float(latest['RSI_9']) if not pd.isna(latest['RSI_9']) else float('nan')
+
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Latest Price", f"{latest['Close']:.2f}")
-        col2.metric("3-EMA", f"{latest['EMA_3']:.2f}")
-        col3.metric("21-WMA", f"{latest['WMA_21']:.2f}")
-        col4.metric("9-RSI", f"{latest['RSI_9']:.2f}")
+        col1.metric("Latest Price", f"{latest_close:.2f}")
+        col2.metric("3-EMA", f"{latest_ema:.2f}")
+        col3.metric("21-WMA", f"{latest_wma:.2f}" if not pd.isna(latest_wma) else "N/A")
+        col4.metric("9-RSI", f"{latest_rsi:.2f}" if not pd.isna(latest_rsi) else "N/A")
 
         st.subheader("Price Chart")
         st.line_chart(data[["Close", "EMA_3", "WMA_21"]].dropna())
