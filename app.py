@@ -16,9 +16,26 @@ symbol = st.sidebar.text_input(
     value="RELIANCE.NS",
     help="NSE stocks need '.NS' suffix. Example: TCS.NS, INFY.NS, RELIANCE.NS"
 )
+
+# Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
+# We fetch the closest available candle size and combine ("resample")
+# it into the requested duration ourselves.
+INTERVAL_CONFIG = {
+    "1m":  {"yf_interval": "1m",  "period": "5d",   "resample": None},
+    "5m":  {"yf_interval": "5m",  "period": "60d",  "resample": None},
+    "10m": {"yf_interval": "5m",  "period": "60d",  "resample": "10min"},
+    "15m": {"yf_interval": "15m", "period": "60d",  "resample": None},
+    "30m": {"yf_interval": "30m", "period": "60d",  "resample": None},
+    "1h":  {"yf_interval": "60m", "period": "180d", "resample": None},
+    "2h":  {"yf_interval": "60m", "period": "180d", "resample": "2h"},
+    "3h":  {"yf_interval": "60m", "period": "180d", "resample": "3h"},
+    "4h":  {"yf_interval": "60m", "period": "180d", "resample": "4h"},
+    "1d":  {"yf_interval": "1d",  "period": "6mo",  "resample": None},
+}
+
 interval = st.sidebar.selectbox(
     "Candle Interval",
-    options=["1m", "5m", "15m", "1d"],
+    options=list(INTERVAL_CONFIG.keys()),
     index=1
 )
 refresh_seconds = st.sidebar.number_input(
@@ -32,7 +49,7 @@ run = st.sidebar.checkbox("Start Live Updates", value=True)
 def calculate_indicators(df):
     df = df.copy()
 
-    # 3-period EMA
+    # 3-period EMA (this also acts as "PRICE" in the signal logic below)
     df["EMA_3"] = df["Close"].ewm(span=3, adjust=False).mean()
 
     # 21-period WMA (Weighted Moving Average)
@@ -53,39 +70,72 @@ def calculate_indicators(df):
     return df
 
 
+# ---------- Signal logic ----------
+def get_signal(rsi, price, wma):
+    """
+    PRICE = 3-period EMA of price (as specified).
+    BUY: RSI > 50 AND RSI > PRICE > WMA
+    SELL: RSI < 50 AND WMA > PRICE > RSI
+    CORRECTION MIGHT BE OVER / SHORT COVERING: RSI < 50 AND RSI > PRICE > WMA
+    """
+    if pd.isna(rsi) or pd.isna(price) or pd.isna(wma):
+        return "NOT ENOUGH DATA", "info"
+
+    if rsi > 50 and rsi > price > wma:
+        return "BUY SIGNAL", "success"
+    elif rsi < 50 and wma > price > rsi:
+        return "SELL SIGNAL", "error"
+    elif rsi < 50 and rsi > price > wma:
+        return "CORRECTION MIGHT BE OVER / SHORT COVERING", "warning"
+    else:
+        return "NO CLEAR SIGNAL", "info"
+
+
+# ---------- Data fetch ----------
+def fetch_data(symbol, interval):
+    cfg = INTERVAL_CONFIG[interval]
+
+    data = yf.download(
+        tickers=symbol,
+        period=cfg["period"],
+        interval=cfg["yf_interval"],
+        progress=False
+    )
+
+    if data.empty:
+        return data
+
+    # Flatten multi-level columns (newer yfinance versions can return
+    # these even for a single ticker)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+
+    # Combine smaller candles into the requested bigger duration
+    if cfg["resample"]:
+        data = data.resample(cfg["resample"]).agg({
+            "Open": "first",
+            "High": "max",
+            "Low": "min",
+            "Close": "last",
+            "Volume": "sum"
+        }).dropna(how="all")
+
+    return data
+
+
 # ---------- Fetch + display ----------
 def fetch_and_display():
     try:
-        # Fix: daily interval needs a longer history to have enough
-        # candles for 21-period WMA and 9-period RSI to calculate
-        period_map = {
-            "1m": "5d",
-            "5m": "5d",
-            "15m": "5d",
-            "1d": "6mo",
-        }
-        period = period_map.get(interval, "5d")
-
-        data = yf.download(
-            tickers=symbol,
-            period=period,
-            interval=interval,
-            progress=False
-        )
+        data = fetch_data(symbol, interval)
 
         if data.empty:
             st.error("No data found. Check the symbol (e.g. use RELIANCE.NS for NSE stocks).")
             return
 
-        # Fix: newer yfinance versions can return multi-level columns
-        # even for a single ticker. Flatten them so values are plain numbers.
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-
         data = calculate_indicators(data)
         latest = data.iloc[-1]
 
-        # Fix: force plain Python floats so formatting never breaks
+        # Force plain Python floats so formatting never breaks
         latest_close = float(latest['Close'])
         latest_ema = float(latest['EMA_3'])
         latest_wma = float(latest['WMA_21']) if not pd.isna(latest['WMA_21']) else float('nan')
@@ -93,9 +143,29 @@ def fetch_and_display():
 
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Latest Price", f"{latest_close:.2f}")
-        col2.metric("3-EMA", f"{latest_ema:.2f}")
+        col2.metric("3-EMA (PRICE)", f"{latest_ema:.2f}")
         col3.metric("21-WMA", f"{latest_wma:.2f}" if not pd.isna(latest_wma) else "N/A")
         col4.metric("9-RSI", f"{latest_rsi:.2f}" if not pd.isna(latest_rsi) else "N/A")
+
+        # ---------- Signal ----------
+        st.subheader("Signal")
+        signal_text, signal_type = get_signal(latest_rsi, latest_ema, latest_wma)
+        if signal_type == "success":
+            st.success(f"📈 {signal_text}")
+        elif signal_type == "error":
+            st.error(f"📉 {signal_text}")
+        elif signal_type == "warning":
+            st.warning(f"⚠️ {signal_text}")
+        else:
+            st.info(f"ℹ️ {signal_text}")
+
+        st.caption(
+            "BUY: RSI > 50 and RSI > PRICE > WMA  |  "
+            "SELL: RSI < 50 and WMA > PRICE > RSI  |  "
+            "CORRECTION/SHORT COVERING: RSI < 50 and RSI > PRICE > WMA  "
+            "(PRICE = 3-period EMA). This is a mechanical rule-based signal, "
+            "not financial advice."
+        )
 
         st.subheader("Price Chart")
         st.line_chart(data[["Close", "EMA_3", "WMA_21"]].dropna())
