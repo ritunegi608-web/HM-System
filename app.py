@@ -3,6 +3,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
+import requests
+import io
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
@@ -144,12 +146,12 @@ def build_chart(data):
     fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
                               hoverinfo="skip"), row=2, col=1)
     fig.add_trace(go.Scatter(x=idx, y=rsi_upper, line=dict(width=0), fill="tonexty",
-                              fillcolor="rgba(255,165,0,0.35)", name="Overbought (>50)",
+                              fillcolor="rgba(144,238,144,0.35)", name="Overbought (>50)",
                               showlegend=True, hoverinfo="skip"), row=2, col=1)
     fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
                               hoverinfo="skip"), row=2, col=1)
     fig.add_trace(go.Scatter(x=idx, y=rsi_lower, line=dict(width=0), fill="tonexty",
-                              fillcolor="rgba(144,238,144,0.35)", name="Oversold (<50)",
+                              fillcolor="rgba(255,200,120,0.35)", name="Oversold (<50)",
                               showlegend=True, hoverinfo="skip"), row=2, col=1)
 
     # Midline at 50
@@ -160,18 +162,18 @@ def build_chart(data):
 
     # RSI line itself
     fig.add_trace(
-        go.Scatter(x=idx, y=rsi, mode="lines", line=dict(color="white", width=1.8),
+        go.Scatter(x=idx, y=rsi, mode="lines", line=dict(color="white", width=1.1),
                    name="RSI (9)"), row=2, col=1
     )
 
     # WMA(21) and EMA(3) of the RSI itself -- same 0-100 scale, like the
     # "Hilega Milega" TradingView indicator (close, 9, 3, 21)
     fig.add_trace(
-        go.Scatter(x=idx, y=rsi_wma, mode="lines", line=dict(color="red", width=1.5),
+        go.Scatter(x=idx, y=rsi_wma, mode="lines", line=dict(color="red", width=1),
                    name="21 WMA (of RSI)"), row=2, col=1
     )
     fig.add_trace(
-        go.Scatter(x=idx, y=rsi_ema, mode="lines", line=dict(color="violet", width=1.5),
+        go.Scatter(x=idx, y=rsi_ema, mode="lines", line=dict(color="violet", width=1),
                    name="3 EMA (of RSI)"), row=2, col=1
     )
 
@@ -216,7 +218,7 @@ def fetch_and_display():
 
         with st.expander("Raw Data (latest rows)"):
             st.dataframe(
-                data[["Close", "EMA_3", "WMA_21", "RSI_9", "RSI_EMA_3", "RSI_WMA_21"]]
+                data[["RSI_9", "RSI_EMA_3", "RSI_WMA_21"]]
                 .tail(15).sort_index(ascending=False)
             )
 
@@ -224,6 +226,191 @@ def fetch_and_display():
 
     except Exception as e:
         st.error(f"Error fetching data: {e}")
+
+
+# ============================================================
+# ---------- Market Scanner: Indexes + Nifty 500 ----------
+# ============================================================
+
+# Major market-cap based & sectoral indexes (verified Yahoo Finance symbols)
+MAJOR_INDEXES = {
+    "NIFTY 50": "^NSEI",
+    "NIFTY NEXT 50": "^NSMIDCP",
+    "NIFTY 100": "^CNX100",
+    "NIFTY 200": "^CNX200",
+    "NIFTY 500": "^CRSLDX",
+    "NIFTY MIDCAP 50": "^NSEMDCP50",
+    "SENSEX": "^BSESN",
+    "NIFTY BANK": "^NSEBANK",
+    "NIFTY IT": "^CNXIT",
+    "NIFTY AUTO": "^CNXAUTO",
+    "NIFTY METAL": "^CNXMETAL",
+    "NIFTY FMCG": "^CNXFMCG",
+    "NIFTY PHARMA": "^CNXPHARMA",
+    "NIFTY ENERGY": "^CNXENERGY",
+    "NIFTY REALTY": "^CNXREALTY",
+    "NIFTY MEDIA": "^CNXMEDIA",
+    "NIFTY PSU BANK": "^CNXPSUBANK",
+    "NIFTY FIN SERVICE": "^CNXFIN",
+    "NIFTY INFRA": "^CNXINFRA",
+    "NIFTY COMMODITIES": "^CNXCMDT",
+}
+
+# Small backup list used only if the live NSE fetch below fails/is blocked
+FALLBACK_SYMBOLS = [
+    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HINDUNILVR", "ITC",
+    "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "AXISBANK", "BAJFINANCE",
+    "ASIANPAINT", "MARUTI", "HCLTECH", "SUNPHARMA", "TITAN", "ULTRACEMCO",
+    "NESTLEIND"
+]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_nifty500_symbols():
+    """Fetch the live Nifty 500 constituent list directly from NSE.
+    Falls back to a small known list if NSE blocks the request."""
+    url = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        session = requests.Session()
+        session.headers.update(headers)
+        session.get("https://www.nseindia.com", timeout=10)  # sets cookies
+        resp = session.get(url, timeout=15)
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.text))
+        symbols = df["Symbol"].astype(str).str.strip().tolist()
+        return symbols
+    except Exception:
+        return FALLBACK_SYMBOLS
+
+
+def scan_symbols(symbols, yf_suffix=".NS"):
+    """Batch-fetch daily data and compute Latest Price, RSI(9),
+    EMA(3) of RSI, and WMA(21) of RSI for each symbol."""
+    tickers = [
+        f"{s}{yf_suffix}" if yf_suffix and not str(s).startswith("^") else s
+        for s in symbols
+    ]
+    weights = np.arange(1, 22)
+
+    try:
+        raw = yf.download(
+            tickers=" ".join(tickers),
+            period="4mo",
+            interval="1d",
+            group_by="ticker",
+            threads=True,
+            progress=False,
+        )
+    except Exception as e:
+        st.error(f"Scanner fetch failed: {e}")
+        return pd.DataFrame()
+
+    rows = []
+    for sym, tkr in zip(symbols, tickers):
+        try:
+            if len(tickers) == 1:
+                df = raw
+            else:
+                if tkr not in raw.columns.get_level_values(0):
+                    continue
+                df = raw[tkr]
+
+            df = df.dropna(how="all")
+            close = df["Close"].dropna()
+            if len(close) < 10:
+                continue
+
+            delta = close.diff()
+            gain = delta.clip(lower=0)
+            loss = -delta.clip(upper=0)
+            avg_gain = gain.ewm(alpha=1 / 9, min_periods=9, adjust=False).mean()
+            avg_loss = loss.ewm(alpha=1 / 9, min_periods=9, adjust=False).mean()
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+
+            rsi_ema3 = rsi.ewm(span=3, adjust=False).mean()
+            rsi_wma21 = rsi.rolling(21).apply(
+                lambda v: np.dot(v, weights) / weights.sum(), raw=True
+            )
+
+            rows.append({
+                "Symbol": sym,
+                "Latest Price": round(float(close.iloc[-1]), 2),
+                "RSI (9)": round(float(rsi.iloc[-1]), 2) if not pd.isna(rsi.iloc[-1]) else None,
+                "EMA(3) of RSI": round(float(rsi_ema3.iloc[-1]), 2) if not pd.isna(rsi_ema3.iloc[-1]) else None,
+                "WMA(21) of RSI": round(float(rsi_wma21.iloc[-1]), 2) if not pd.isna(rsi_wma21.iloc[-1]) else None,
+            })
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
+
+
+st.divider()
+st.header("🔍 Market Scanner — Indexes & Nifty 500")
+st.caption(
+    "Daily-timeframe scan, separate from the live auto-refresh chart above. "
+    "Scanning 500+ stocks can take a few minutes and only refreshes when you "
+    "click the button (continuous live scanning of 500 stocks would get "
+    "rate-limited by Yahoo Finance)."
+)
+
+if "scanner_index_df" not in st.session_state:
+    st.session_state.scanner_index_df = None
+if "scanner_stocks_df" not in st.session_state:
+    st.session_state.scanner_stocks_df = None
+
+if st.button("▶️ Run / Refresh Scanner"):
+    with st.spinner("Scanning major indexes..."):
+        index_names = list(MAJOR_INDEXES.keys())
+        index_symbols = list(MAJOR_INDEXES.values())
+        idx_df = scan_symbols(index_symbols, yf_suffix="")
+        if not idx_df.empty:
+            name_map = dict(zip(index_symbols, index_names))
+            idx_df.insert(0, "Index", idx_df["Symbol"].map(name_map))
+            idx_df = idx_df.drop(columns=["Symbol"])
+        st.session_state.scanner_index_df = idx_df
+
+    with st.spinner("Scanning Nifty 500 stocks (this can take a few minutes)..."):
+        nifty500 = get_nifty500_symbols()
+        stocks_df = scan_symbols(nifty500, yf_suffix=".NS")
+        st.session_state.scanner_stocks_df = stocks_df
+
+if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
+    tab_all, tab_idx, tab_stocks = st.tabs(["All", "Indexes", "Nifty 500 Stocks"])
+
+    with tab_idx:
+        st.dataframe(st.session_state.scanner_index_df, use_container_width=True)
+
+    with tab_stocks:
+        st.dataframe(st.session_state.scanner_stocks_df, use_container_width=True)
+
+    with tab_all:
+        st.write("**Indexes**")
+        st.dataframe(st.session_state.scanner_index_df, use_container_width=True)
+        st.write("**Nifty 500 Stocks**")
+        st.dataframe(st.session_state.scanner_stocks_df, use_container_width=True)
+
+    # ---- Download as a single Excel file with 2 separate sheets ----
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        st.session_state.scanner_index_df.to_excel(writer, sheet_name="Indexes", index=False)
+        st.session_state.scanner_stocks_df.to_excel(writer, sheet_name="Nifty500_Stocks", index=False)
+    excel_buffer.seek(0)
+
+    st.download_button(
+        label="⬇️ Download Excel (Indexes + Nifty 500 — 2 sheets)",
+        data=excel_buffer,
+        file_name=f"market_scan_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+else:
+    st.info("Click 'Run / Refresh Scanner' to load index and Nifty 500 data.")
 
 
 # ---------- Live loop ----------
