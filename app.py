@@ -40,7 +40,7 @@ INTERVAL_CONFIG = {
 interval = st.sidebar.selectbox(
     "Candle Interval",
     options=list(INTERVAL_CONFIG.keys()),
-    index=1
+    index=list(INTERVAL_CONFIG.keys()).index("1d")
 )
 refresh_seconds = st.sidebar.number_input(
     "Auto-refresh every (seconds)",
@@ -48,7 +48,7 @@ refresh_seconds = st.sidebar.number_input(
 )
 num_bars = st.sidebar.slider(
     "Candles to show on chart",
-    min_value=30, max_value=300, value=100,
+    min_value=30, max_value=300, value=45,
     help="Fewer candles = cleaner, less zig-zag chart (like TradingView's default zoomed view)"
 )
 run = st.sidebar.checkbox("Start Live Updates", value=True)
