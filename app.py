@@ -56,9 +56,19 @@ def calculate_indicators(df):
 # ---------- Fetch + display ----------
 def fetch_and_display():
     try:
+        # Fix: daily interval needs a longer history to have enough
+        # candles for 21-period WMA and 9-period RSI to calculate
+        period_map = {
+            "1m": "5d",
+            "5m": "5d",
+            "15m": "5d",
+            "1d": "6mo",
+        }
+        period = period_map.get(interval, "5d")
+
         data = yf.download(
             tickers=symbol,
-            period="5d",
+            period=period,
             interval=interval,
             progress=False
         )
