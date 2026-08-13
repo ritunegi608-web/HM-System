@@ -17,7 +17,7 @@ st.caption("Latest Price | 3-Period EMA | 21-Period WMA | 9-Period RSI")
 st.sidebar.header("Settings")
 symbol = st.sidebar.text_input(
     "Enter Stock Symbol (Yahoo Finance format)",
-    value=st.session_state.get("symbol_input", "RELIANCE.NS"),
+    value=st.session_state.get("symbol_input", "^NSEI"),
     help="NSE stocks need '.NS' suffix. Example: TCS.NS, INFY.NS, RELIANCE.NS",
     key="symbol_input"
 )
@@ -636,11 +636,6 @@ def display_frozen(df, name_col="Symbol"):
 
 if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
     st.caption(f"Data timeframe: **{st.session_state.scanner_interval_used}**")
-    st.caption(
-        "Tip: copy a value from the **Yahoo Name** column (the working "
-        "ticker) and paste it into the 'Enter Stock Symbol' box in the "
-        "sidebar menu above to view its chart."
-    )
 
     tab_all, tab_idx, tab_stocks = st.tabs(["All", "Indexes", "Nifty 500 Stocks"])
 
@@ -655,6 +650,22 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
         st.dataframe(display_frozen(st.session_state.scanner_index_df), use_container_width=True)
         st.write("**Nifty 500 Stocks**")
         st.dataframe(display_frozen(st.session_state.scanner_stocks_df), use_container_width=True)
+
+    # ---- Plain-text ticker list: guaranteed copy/paste on mobile ----
+    # (the table above renders on canvas, so its text can't be long-pressed
+    # and selected -- a text box's content always can be.)
+    with st.expander("📋 Copy a ticker (tap the box, select text, copy)"):
+        idx_lines = "\n".join(
+            f"{row['Symbol']}: {row['Yahoo Name']}"
+            for _, row in st.session_state.scanner_index_df.iterrows()
+        )
+        st.text_area("Indexes — Name: Ticker", value=idx_lines, height=200)
+
+        stocks_lines = "\n".join(
+            f"{row['Symbol']}: {row['Yahoo Name']}"
+            for _, row in st.session_state.scanner_stocks_df.iterrows()
+        )
+        st.text_area("Nifty 500 Stocks — Name: Ticker", value=stocks_lines, height=300)
 
     # ---- Download as a single Excel file with 2 separate sheets ----
     from openpyxl.styles import Font
