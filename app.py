@@ -13,6 +13,74 @@ st.set_page_config(page_title="Live Stock Dashboard", layout="wide")
 st.title("📈 Live Stock Dashboard")
 st.caption("Latest Price | 3-Period EMA | 21-Period WMA | 9-Period RSI")
 
+# Major market-cap based & sectoral indexes (verified Yahoo Finance symbols)
+MAJOR_INDEXES = {
+    "NIFTY 50": "^NSEI",
+    "NIFTY NEXT 50": "^NSMIDCP",
+    "NIFTY 100": "^CNX100",
+    "NIFTY 200": "^CNX200",
+    "NIFTY 500": "^CRSLDX",
+    "NIFTY MIDCAP 50": "^NSEMDCP50",
+    "NIFTY MIDCAP 100": "NIFTY_MIDCAP_100.NS",
+    "NIFTY MIDCAP 150": "NIFTYMIDCAP150.NS",
+    "NIFTY SMLCAP 50": "NIFTYSMLCAP50.NS",
+    "NIFTY SMLCAP 100": "^CNXSC",
+    "NIFTY SMLCAP 250": "NIFTYSMLCAP250.NS",
+    "S&P BSE SENSEX": "^BSESN",
+    "NIFTY BANK": "^NSEBANK",
+    "NIFTY IT": "^CNXIT",
+    "NIFTY AUTO": "^CNXAUTO",
+    "NIFTY METAL": "^CNXMETAL",
+    "NIFTY FMCG": "^CNXFMCG",
+    "NIFTY PHARMA": "^CNXPHARMA",
+    "NIFTY ENERGY": "^CNXENERGY",
+    "NIFTY REALTY": "^CNXREALTY",
+    "NIFTY MEDIA": "^CNXMEDIA",
+    "NIFTY PSU BANK": "^CNXPSUBANK",
+    "NIFTY FIN SERVICE": "NIFTY_FIN_SERVICE.NS",
+    "NIFTY INFRA": "^CNXINFRA",
+    "NIFTY COMMODITIES": "^CNXCMDT",
+}
+
+# Small backup list used only if the live NSE fetch below fails/is blocked
+FALLBACK_SYMBOLS = [
+    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HINDUNILVR", "ITC",
+    "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "AXISBANK", "BAJFINANCE",
+    "ASIANPAINT", "MARUTI", "HCLTECH", "SUNPHARMA", "TITAN", "ULTRACEMCO",
+    "NESTLEIND"
+]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_nifty500_details():
+    """Fetch the live Nifty 500 constituent list + company names from NSE
+    (the CSV already includes names, so no per-stock Yahoo lookup is
+    needed -- 500 individual lookups would be far too slow).
+    Falls back to a small known list if NSE blocks the request. This is
+    just the constituent list (fast) -- separate from the full price scan."""
+    url = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        session = requests.Session()
+        session.headers.update(headers)
+        session.get("https://www.nseindia.com", timeout=10)  # sets cookies
+        resp = session.get(url, timeout=15)
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.text))
+        symbols = df["Symbol"].astype(str).str.strip().tolist()
+        names = dict(zip(
+            df["Symbol"].astype(str).str.strip(),
+            df["Company Name"].astype(str).str.strip()
+        ))
+        return symbols, names
+    except Exception:
+        return FALLBACK_SYMBOLS, {}
+
+
 # ---------- Sidebar inputs ----------
 st.sidebar.header("Settings")
 symbol = st.sidebar.text_input(
@@ -23,19 +91,21 @@ symbol = st.sidebar.text_input(
 )
 
 st.sidebar.subheader("📋 Copy a ticker")
-_idx_df = st.session_state.get("scanner_index_df")
-_stocks_df = st.session_state.get("scanner_stocks_df")
 _side_tab_idx, _side_tab_stocks = st.sidebar.tabs(["Indexes", "Nifty 500 Stocks"])
 with _side_tab_idx:
-    if _idx_df is not None and not _idx_df.empty:
-        st.dataframe(_idx_df[["Symbol", "Yahoo Name"]], use_container_width=True, hide_index=True)
-    else:
-        st.caption("Run the Market Scanner below to populate this list.")
+    _idx_copy_df = pd.DataFrame({
+        "Symbol": list(MAJOR_INDEXES.keys()),
+        "Yahoo Name": list(MAJOR_INDEXES.values()),
+    })
+    st.dataframe(_idx_copy_df, use_container_width=True, hide_index=True)
 with _side_tab_stocks:
-    if _stocks_df is not None and not _stocks_df.empty:
-        st.dataframe(_stocks_df[["Symbol", "Yahoo Name"]], use_container_width=True, hide_index=True)
-    else:
-        st.caption("Run the Market Scanner below to populate this list.")
+    with st.spinner("Loading Nifty 500 list from NSE..."):
+        _n500_symbols, _n500_names = get_nifty500_details()
+    _stocks_copy_df = pd.DataFrame({
+        "Symbol": [_n500_names.get(s, s) for s in _n500_symbols],
+        "Yahoo Name": [f"{s}.NS" for s in _n500_symbols],
+    })
+    st.dataframe(_stocks_copy_df, use_container_width=True, hide_index=True)
 
 # Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
 # We fetch the closest available candle size and combine ("resample")
@@ -306,79 +376,12 @@ def fetch_and_display():
 # ---------- Market Scanner: Indexes + Nifty 500 ----------
 # ============================================================
 
-# Major market-cap based & sectoral indexes (verified Yahoo Finance symbols)
-MAJOR_INDEXES = {
-    "NIFTY 50": "^NSEI",
-    "NIFTY NEXT 50": "^NSMIDCP",
-    "NIFTY 100": "^CNX100",
-    "NIFTY 200": "^CNX200",
-    "NIFTY 500": "^CRSLDX",
-    "NIFTY MIDCAP 50": "^NSEMDCP50",
-    "NIFTY MIDCAP 100": "NIFTY_MIDCAP_100.NS",
-    "NIFTY MIDCAP 150": "NIFTYMIDCAP150.NS",
-    "NIFTY SMLCAP 50": "NIFTYSMLCAP50.NS",
-    "NIFTY SMLCAP 100": "^CNXSC",
-    "NIFTY SMLCAP 250": "NIFTYSMLCAP250.NS",
-    "S&P BSE SENSEX": "^BSESN",
-    "NIFTY BANK": "^NSEBANK",
-    "NIFTY IT": "^CNXIT",
-    "NIFTY AUTO": "^CNXAUTO",
-    "NIFTY METAL": "^CNXMETAL",
-    "NIFTY FMCG": "^CNXFMCG",
-    "NIFTY PHARMA": "^CNXPHARMA",
-    "NIFTY ENERGY": "^CNXENERGY",
-    "NIFTY REALTY": "^CNXREALTY",
-    "NIFTY MEDIA": "^CNXMEDIA",
-    "NIFTY PSU BANK": "^CNXPSUBANK",
-    "NIFTY FIN SERVICE": "NIFTY_FIN_SERVICE.NS",
-    "NIFTY INFRA": "^CNXINFRA",
-    "NIFTY COMMODITIES": "^CNXCMDT",
-}
-
-# Small backup list used only if the live NSE fetch below fails/is blocked
-FALLBACK_SYMBOLS = [
-    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HINDUNILVR", "ITC",
-    "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "AXISBANK", "BAJFINANCE",
-    "ASIANPAINT", "MARUTI", "HCLTECH", "SUNPHARMA", "TITAN", "ULTRACEMCO",
-    "NESTLEIND"
-]
-
-
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_nifty500_symbols():
     """Fetch the live Nifty 500 constituent list directly from NSE.
     Falls back to a small known list if NSE blocks the request."""
     symbols, _ = get_nifty500_details()
     return symbols
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_nifty500_details():
-    """Fetch the live Nifty 500 constituent list + company names from NSE
-    (the CSV already includes names, so no per-stock Yahoo lookup is
-    needed -- 500 individual lookups would be far too slow).
-    Falls back to a small known list if NSE blocks the request."""
-    url = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    try:
-        session = requests.Session()
-        session.headers.update(headers)
-        session.get("https://www.nseindia.com", timeout=10)  # sets cookies
-        resp = session.get(url, timeout=15)
-        resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.text))
-        symbols = df["Symbol"].astype(str).str.strip().tolist()
-        names = dict(zip(
-            df["Symbol"].astype(str).str.strip(),
-            df["Company Name"].astype(str).str.strip()
-        ))
-        return symbols, names
-    except Exception:
-        return FALLBACK_SYMBOLS, {}
 
 
 # Market-cap based category files, in the display/sort order requested
