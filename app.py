@@ -347,7 +347,7 @@ CATEGORY_FILES = [
 CATEGORY_ORDER = [c[0] for c in CATEGORY_FILES] + ["OTHER (NIFTY 500)"]
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_categories():
     """Fetch each market-cap category's live constituent list from NSE and
     build a symbol -> category lookup. If a stock appears in more than one
@@ -356,31 +356,35 @@ def get_stock_categories():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/",
     }
     category_map = {}
     category_symbol_order = {}
-    session = requests.Session()
-    session.headers.update(headers)
-    try:
-        session.get("https://www.nseindia.com", timeout=10)
-    except Exception:
-        pass
+    fetch_errors = {}
 
     for name, fname in CATEGORY_FILES:
         try:
+            # Fresh session per file -- NSE can reject a session's 2nd/3rd
+            # request even though the cookie looks valid.
+            session = requests.Session()
+            session.headers.update(headers)
+            session.get("https://www.nseindia.com", timeout=10)
             url = f"https://nsearchives.nseindia.com/content/indices/{fname}"
             resp = session.get(url, timeout=15)
             resp.raise_for_status()
             df = pd.read_csv(io.StringIO(resp.text))
             syms = df["Symbol"].astype(str).str.strip().tolist()
-        except Exception:
+            if not syms:
+                fetch_errors[name] = "File fetched but had no Symbol column / was empty"
+        except Exception as e:
             syms = []
+            fetch_errors[name] = str(e)
         category_symbol_order[name] = syms
         for s in syms:
             if s not in category_map:  # first (highest-priority) category wins
                 category_map[s] = name
 
-    return category_map, category_symbol_order
+    return category_map, category_symbol_order, fetch_errors
 
 
 def sort_stocks_by_category(df, category_map, category_symbol_order):
@@ -562,7 +566,10 @@ if st.button("▶️ Run / Refresh Scanner"):
         st.session_state.scanner_index_df = idx_df
 
     with st.spinner("Fetching Nifty 50 / Next 50 / Midcap 250 / Smallcap 250 category lists..."):
-        category_map, category_symbol_order = get_stock_categories()
+        category_map, category_symbol_order, category_fetch_errors = get_stock_categories()
+        for cat_name, err in category_fetch_errors.items():
+            st.warning(f"⚠️ Could not fetch '{cat_name}' list from NSE ({err}). "
+                       f"Those stocks will show as 'OTHER (NIFTY 500)' until this succeeds.")
 
     with st.spinner("Scanning Nifty 500 stocks (this can take a few minutes)..."):
         nifty500 = get_nifty500_symbols()
