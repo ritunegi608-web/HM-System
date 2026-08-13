@@ -22,6 +22,21 @@ symbol = st.sidebar.text_input(
     key="symbol_input"
 )
 
+st.sidebar.subheader("📋 Copy a ticker")
+_idx_df = st.session_state.get("scanner_index_df")
+_stocks_df = st.session_state.get("scanner_stocks_df")
+_side_tab_idx, _side_tab_stocks = st.sidebar.tabs(["Indexes", "Nifty 500 Stocks"])
+with _side_tab_idx:
+    if _idx_df is not None and not _idx_df.empty:
+        st.dataframe(_idx_df[["Symbol", "Yahoo Name"]], use_container_width=True, hide_index=True)
+    else:
+        st.caption("Run the Market Scanner below to populate this list.")
+with _side_tab_stocks:
+    if _stocks_df is not None and not _stocks_df.empty:
+        st.dataframe(_stocks_df[["Symbol", "Yahoo Name"]], use_container_width=True, hide_index=True)
+    else:
+        st.caption("Run the Market Scanner below to populate this list.")
+
 # Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
 # We fetch the closest available candle size and combine ("resample")
 # it into the requested duration ourselves.
@@ -650,22 +665,6 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
         st.dataframe(display_frozen(st.session_state.scanner_index_df), use_container_width=True)
         st.write("**Nifty 500 Stocks**")
         st.dataframe(display_frozen(st.session_state.scanner_stocks_df), use_container_width=True)
-
-    # ---- Plain-text ticker list: guaranteed copy/paste on mobile ----
-    # (the table above renders on canvas, so its text can't be long-pressed
-    # and selected -- a text box's content always can be.)
-    with st.expander("📋 Copy a ticker (tap the box, select text, copy)"):
-        idx_lines = "\n".join(
-            f"{row['Symbol']}: {row['Yahoo Name']}"
-            for _, row in st.session_state.scanner_index_df.iterrows()
-        )
-        st.text_area("Indexes — Name: Ticker", value=idx_lines, height=200)
-
-        stocks_lines = "\n".join(
-            f"{row['Symbol']}: {row['Yahoo Name']}"
-            for _, row in st.session_state.scanner_stocks_df.iterrows()
-        )
-        st.text_area("Nifty 500 Stocks — Name: Ticker", value=stocks_lines, height=300)
 
     # ---- Download as a single Excel file with 2 separate sheets ----
     from openpyxl.styles import Font
