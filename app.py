@@ -17,8 +17,9 @@ st.caption("Latest Price | 3-Period EMA | 21-Period WMA | 9-Period RSI")
 st.sidebar.header("Settings")
 symbol = st.sidebar.text_input(
     "Enter Stock Symbol (Yahoo Finance format)",
-    value="RELIANCE.NS",
-    help="NSE stocks need '.NS' suffix. Example: TCS.NS, INFY.NS, RELIANCE.NS"
+    value=st.session_state.get("symbol_input", "RELIANCE.NS"),
+    help="NSE stocks need '.NS' suffix. Example: TCS.NS, INFY.NS, RELIANCE.NS",
+    key="symbol_input"
 )
 
 # Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
@@ -298,7 +299,12 @@ MAJOR_INDEXES = {
     "NIFTY 200": "^CNX200",
     "NIFTY 500": "^CRSLDX",
     "NIFTY MIDCAP 50": "^NSEMDCP50",
-    "SENSEX": "^BSESN",
+    "NIFTY MIDCAP 100": "NIFTY_MIDCAP_100.NS",
+    "NIFTY MIDCAP 150": "NIFTYMIDCAP150.NS",
+    "NIFTY SMLCAP 50": "NIFTYSMLCAP50.NS",
+    "NIFTY SMLCAP 100": "^CNXSC",
+    "NIFTY SMLCAP 250": "NIFTYSMLCAP250.NS",
+    "S&P BSE SENSEX": "^BSESN",
     "NIFTY BANK": "^NSEBANK",
     "NIFTY IT": "^CNXIT",
     "NIFTY AUTO": "^CNXAUTO",
@@ -309,7 +315,7 @@ MAJOR_INDEXES = {
     "NIFTY REALTY": "^CNXREALTY",
     "NIFTY MEDIA": "^CNXMEDIA",
     "NIFTY PSU BANK": "^CNXPSUBANK",
-    "NIFTY FIN SERVICE": "^CNXFIN",
+    "NIFTY FIN SERVICE": "NIFTY_FIN_SERVICE.NS",
     "NIFTY INFRA": "^CNXINFRA",
     "NIFTY COMMODITIES": "^CNXCMDT",
 }
@@ -327,6 +333,16 @@ FALLBACK_SYMBOLS = [
 def get_nifty500_symbols():
     """Fetch the live Nifty 500 constituent list directly from NSE.
     Falls back to a small known list if NSE blocks the request."""
+    symbols, _ = get_nifty500_details()
+    return symbols
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_nifty500_details():
+    """Fetch the live Nifty 500 constituent list + company names from NSE
+    (the CSV already includes names, so no per-stock Yahoo lookup is
+    needed -- 500 individual lookups would be far too slow).
+    Falls back to a small known list if NSE blocks the request."""
     url = "https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -341,9 +357,13 @@ def get_nifty500_symbols():
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
         symbols = df["Symbol"].astype(str).str.strip().tolist()
-        return symbols
+        names = dict(zip(
+            df["Symbol"].astype(str).str.strip(),
+            df["Company Name"].astype(str).str.strip()
+        ))
+        return symbols, names
     except Exception:
-        return FALLBACK_SYMBOLS
+        return FALLBACK_SYMBOLS, {}
 
 
 # Market-cap based category files, in the display/sort order requested
@@ -569,19 +589,18 @@ if st.button("▶️ Run / Refresh Scanner"):
         idx_df = scan_symbols(index_symbols, yf_suffix="", interval=scanner_interval)
         if not idx_df.empty:
             name_map = dict(zip(index_symbols, index_names))
-            idx_df.insert(0, "Index", idx_df["Symbol"].map(name_map))
-            idx_df = idx_df.drop(columns=["Symbol"])
+            idx_df["Yahoo Name"] = idx_df["Symbol"].map(name_map)  # last column
             idx_df.insert(0, "Sr. No.", range(1, len(idx_df) + 1))
         st.session_state.scanner_index_df = idx_df
 
-    with st.spinner("Fetching Nifty 50 / Next 50 / Midcap 250 / Smallcap 250 category lists..."):
+    with st.spinner("Fetching Nifty 50 / Next 50 / Midcap 150 / Smallcap 250 category lists..."):
         category_map, category_symbol_order, category_fetch_errors = get_stock_categories()
         for cat_name, err in category_fetch_errors.items():
             st.warning(f"⚠️ Could not fetch '{cat_name}' list from NSE ({err}). "
                        f"Those stocks will show as 'OTHER (NIFTY 500)' until this succeeds.")
 
     with st.spinner("Scanning Nifty 500 stocks (this can take a few minutes)..."):
-        nifty500 = get_nifty500_symbols()
+        nifty500, nifty500_names = get_nifty500_details()
         stocks_df = scan_symbols(nifty500, yf_suffix=".NS", interval=scanner_interval)
         if not stocks_df.empty:
             stocks_df = sort_stocks_by_category(stocks_df, category_map, category_symbol_order)
@@ -589,19 +608,21 @@ if st.button("▶️ Run / Refresh Scanner"):
                 lambda s: category_map.get(s, "OTHER (NIFTY 500)")
             ))
             stocks_df.insert(0, "Sr. No.", range(1, len(stocks_df) + 1))
-            # Column order: Sr. No., Symbol (frozen pair), then Category, then data
+            stocks_df["Yahoo Name"] = stocks_df["Symbol"].map(nifty500_names).fillna(stocks_df["Symbol"])
+            # Column order: Sr. No., Symbol (frozen pair), Category, data..., Yahoo Name (last)
             cols = ["Sr. No.", "Symbol", "Category"] + [
-                c for c in stocks_df.columns if c not in ("Sr. No.", "Symbol", "Category")
-            ]
+                c for c in stocks_df.columns
+                if c not in ("Sr. No.", "Symbol", "Category", "Yahoo Name")
+            ] + ["Yahoo Name"]
             stocks_df = stocks_df[cols]
         st.session_state.scanner_stocks_df = stocks_df
 
     st.session_state.scanner_interval_used = scanner_interval
 
 
-def display_frozen(df, name_col):
-    """Pin 'Sr. No.' and the name column (Index/Symbol) while the rest of
-    the columns stay horizontally scrollable, by making them the index."""
+def display_frozen(df, name_col="Symbol"):
+    """Pin 'Sr. No.' and the Symbol column while the rest of the columns
+    (including Yahoo Name at the end) stay horizontally scrollable."""
     df2 = df.set_index(["Sr. No.", name_col])
     return style_signal_rows(df2)
 
@@ -612,16 +633,27 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
     tab_all, tab_idx, tab_stocks = st.tabs(["All", "Indexes", "Nifty 500 Stocks"])
 
     with tab_idx:
-        st.dataframe(display_frozen(st.session_state.scanner_index_df, "Index"), use_container_width=True)
+        st.dataframe(display_frozen(st.session_state.scanner_index_df), use_container_width=True)
 
     with tab_stocks:
-        st.dataframe(display_frozen(st.session_state.scanner_stocks_df, "Symbol"), use_container_width=True)
+        st.dataframe(display_frozen(st.session_state.scanner_stocks_df), use_container_width=True)
 
     with tab_all:
         st.write("**Indexes**")
-        st.dataframe(display_frozen(st.session_state.scanner_index_df, "Index"), use_container_width=True)
+        st.dataframe(display_frozen(st.session_state.scanner_index_df), use_container_width=True)
         st.write("**Nifty 500 Stocks**")
-        st.dataframe(display_frozen(st.session_state.scanner_stocks_df, "Symbol"), use_container_width=True)
+        st.dataframe(display_frozen(st.session_state.scanner_stocks_df), use_container_width=True)
+
+    # ---- Quick jump: view any scanned symbol's chart above ----
+    st.subheader("📈 Jump to a symbol's chart")
+    all_symbols = (
+        list(st.session_state.scanner_index_df["Symbol"])
+        + list(st.session_state.scanner_stocks_df["Symbol"])
+    )
+    jump_symbol = st.selectbox("Pick a symbol from the scan results", options=all_symbols)
+    if st.button("View this symbol's chart (scroll up)"):
+        st.session_state["symbol_input"] = jump_symbol
+        st.rerun()
 
     # ---- Download as a single Excel file with 2 separate sheets ----
     from openpyxl.styles import Font
