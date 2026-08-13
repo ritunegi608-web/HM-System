@@ -35,6 +35,8 @@ INTERVAL_CONFIG = {
     "3h":  {"yf_interval": "60m", "period": "730d", "resample": "3h"},
     "4h":  {"yf_interval": "60m", "period": "730d", "resample": "4h"},
     "1d":  {"yf_interval": "1d",  "period": "10y",  "resample": None},
+    "1wk": {"yf_interval": "1wk", "period": "max",  "resample": None},
+    "1mo": {"yf_interval": "1mo", "period": "max",  "resample": None},
 }
 
 interval = st.sidebar.selectbox(
@@ -251,9 +253,15 @@ def fetch_and_display():
         col3.metric("PRICE (3-EMA of RSI)", f"{float(latest['RSI_EMA_3']):.2f}" if not pd.isna(latest['RSI_EMA_3']) else "N/A")
         col4.metric("21-WMA of RSI", f"{float(latest['RSI_WMA_21']):.2f}" if not pd.isna(latest['RSI_WMA_21']) else "N/A")
 
+        # Cap how much history feeds the chart: enough to scroll back a
+        # good while, without letting the y-axis stretch to a decade's
+        # price range (which shrinks the recent candles to nothing).
+        MAX_CHART_BARS = 300
+        chart_data = data.tail(MAX_CHART_BARS) if len(data) > MAX_CHART_BARS else data
+
         st.plotly_chart(
             build_chart(
-                data,
+                chart_data,
                 num_bars=num_bars,
                 is_intraday=(interval in ["1m", "5m", "10m", "15m", "30m", "1h", "2h", "3h", "4h"])
             ),
