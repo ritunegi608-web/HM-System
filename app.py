@@ -274,7 +274,8 @@ def fetch_and_display():
 
         with st.expander("Raw Data (latest rows)"):
             st.dataframe(
-                data[["RSI_9", "RSI_EMA_3", "RSI_WMA_21"]]
+                data[["Close", "RSI_9", "RSI_EMA_3", "RSI_WMA_21"]]
+                .rename(columns={"Close": "Last Traded Price"})
                 .tail(15).sort_index(ascending=False)
                 .style.format("{:.2f}")
             )
