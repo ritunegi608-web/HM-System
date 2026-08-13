@@ -589,7 +589,11 @@ if st.button("▶️ Run / Refresh Scanner"):
         idx_df = scan_symbols(index_symbols, yf_suffix="", interval=scanner_interval)
         if not idx_df.empty:
             name_map = dict(zip(index_symbols, index_names))
-            idx_df["Yahoo Name"] = idx_df["Symbol"].map(name_map)  # last column
+            # "Yahoo Name" holds the actual working ticker (copy this into the
+            # sidebar symbol box). "Symbol" holds the friendly name so it's
+            # easy to identify the row while it's pinned during scrolling.
+            idx_df["Yahoo Name"] = idx_df["Symbol"]
+            idx_df["Symbol"] = idx_df["Symbol"].map(name_map)
             idx_df.insert(0, "Sr. No.", range(1, len(idx_df) + 1))
         st.session_state.scanner_index_df = idx_df
 
@@ -608,7 +612,10 @@ if st.button("▶️ Run / Refresh Scanner"):
                 lambda s: category_map.get(s, "OTHER (NIFTY 500)")
             ))
             stocks_df.insert(0, "Sr. No.", range(1, len(stocks_df) + 1))
-            stocks_df["Yahoo Name"] = stocks_df["Symbol"].map(nifty500_names).fillna(stocks_df["Symbol"])
+            # "Yahoo Name" holds the actual working ticker (with .NS) to copy
+            # into the sidebar symbol box. "Symbol" holds the company name.
+            stocks_df["Yahoo Name"] = stocks_df["Symbol"] + ".NS"
+            stocks_df["Symbol"] = stocks_df["Symbol"].map(nifty500_names).fillna(stocks_df["Symbol"])
             # Column order: Sr. No., Symbol (frozen pair), Category, data..., Yahoo Name (last)
             cols = ["Sr. No.", "Symbol", "Category"] + [
                 c for c in stocks_df.columns
@@ -629,6 +636,11 @@ def display_frozen(df, name_col="Symbol"):
 
 if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
     st.caption(f"Data timeframe: **{st.session_state.scanner_interval_used}**")
+    st.caption(
+        "Tip: copy a value from the **Yahoo Name** column (the working "
+        "ticker) and paste it into the 'Enter Stock Symbol' box in the "
+        "sidebar menu above to view its chart."
+    )
 
     tab_all, tab_idx, tab_stocks = st.tabs(["All", "Indexes", "Nifty 500 Stocks"])
 
@@ -643,17 +655,6 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
         st.dataframe(display_frozen(st.session_state.scanner_index_df), use_container_width=True)
         st.write("**Nifty 500 Stocks**")
         st.dataframe(display_frozen(st.session_state.scanner_stocks_df), use_container_width=True)
-
-    # ---- Quick jump: view any scanned symbol's chart above ----
-    st.subheader("📈 Jump to a symbol's chart")
-    all_symbols = (
-        list(st.session_state.scanner_index_df["Symbol"])
-        + list(st.session_state.scanner_stocks_df["Symbol"])
-    )
-    jump_symbol = st.selectbox("Pick a symbol from the scan results", options=all_symbols)
-    if st.button("View this symbol's chart (scroll up)"):
-        st.session_state["symbol_input"] = jump_symbol
-        st.rerun()
 
     # ---- Download as a single Excel file with 2 separate sheets ----
     from openpyxl.styles import Font
