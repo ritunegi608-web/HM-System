@@ -25,16 +25,16 @@ symbol = st.sidebar.text_input(
 # We fetch the closest available candle size and combine ("resample")
 # it into the requested duration ourselves.
 INTERVAL_CONFIG = {
-    "1m":  {"yf_interval": "1m",  "period": "5d",   "resample": None},
+    "1m":  {"yf_interval": "1m",  "period": "7d",   "resample": None},
     "5m":  {"yf_interval": "5m",  "period": "60d",  "resample": None},
     "10m": {"yf_interval": "5m",  "period": "60d",  "resample": "10min"},
     "15m": {"yf_interval": "15m", "period": "60d",  "resample": None},
     "30m": {"yf_interval": "30m", "period": "60d",  "resample": None},
-    "1h":  {"yf_interval": "60m", "period": "180d", "resample": None},
-    "2h":  {"yf_interval": "60m", "period": "180d", "resample": "2h"},
-    "3h":  {"yf_interval": "60m", "period": "180d", "resample": "3h"},
-    "4h":  {"yf_interval": "60m", "period": "180d", "resample": "4h"},
-    "1d":  {"yf_interval": "1d",  "period": "6mo",  "resample": None},
+    "1h":  {"yf_interval": "60m", "period": "730d", "resample": None},
+    "2h":  {"yf_interval": "60m", "period": "730d", "resample": "2h"},
+    "3h":  {"yf_interval": "60m", "period": "730d", "resample": "3h"},
+    "4h":  {"yf_interval": "60m", "period": "730d", "resample": "4h"},
+    "1d":  {"yf_interval": "1d",  "period": "10y",  "resample": None},
 }
 
 interval = st.sidebar.selectbox(
@@ -88,6 +88,16 @@ def calculate_indicators(df):
 
 
 # ---------- Data fetch ----------
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_company_name(sym):
+    """Look up the friendly company/index name for the selected symbol."""
+    try:
+        info = yf.Ticker(sym).info
+        return info.get("longName") or info.get("shortName") or sym
+    except Exception:
+        return sym
+
+
 def fetch_data(symbol, interval):
     cfg = INTERVAL_CONFIG[interval]
 
@@ -229,6 +239,8 @@ def fetch_and_display():
         latest = data.iloc[-1]
 
         latest_close = float(latest['Close'])
+        col_name = get_company_name(symbol)
+        st.subheader(f"📊 {col_name} ({symbol})")
         latest_ema = float(latest['EMA_3'])
         latest_wma = float(latest['WMA_21']) if not pd.isna(latest['WMA_21']) else float('nan')
         latest_rsi = float(latest['RSI_9']) if not pd.isna(latest['RSI_9']) else float('nan')
@@ -329,7 +341,7 @@ def get_nifty500_symbols():
 CATEGORY_FILES = [
     ("NIFTY 50", "ind_nifty50list.csv"),
     ("NIFTY NEXT 50", "ind_niftynext50list.csv"),
-    ("NIFTY MIDCAP 250", "ind_niftymidcap250list.csv"),
+    ("NIFTY MIDCAP 150", "ind_niftymidcap150list.csv"),
     ("NIFTY SMALLCAP 250", "ind_niftysmallcap250list.csv"),
 ]
 CATEGORY_ORDER = [c[0] for c in CATEGORY_FILES] + ["OTHER (NIFTY 500)"]
