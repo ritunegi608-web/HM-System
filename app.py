@@ -117,7 +117,7 @@ def fetch_data(symbol, interval):
 
 
 # ---------- Chart (TradingView "Hilega Milega" style) ----------
-def build_chart(data, is_intraday=False):
+def build_chart(data, num_bars=45, is_intraday=False):
     idx = data.index
     close = data["Close"]
     rsi = data["RSI_9"]
@@ -194,6 +194,16 @@ def build_chart(data, is_intraday=False):
     fig.update_xaxes(rangebreaks=rangebreaks, row=1, col=1)
     fig.update_xaxes(rangebreaks=rangebreaks, row=2, col=1)
 
+    # Show only the last `num_bars` candles initially, but keep the full
+    # fetched history in the figure so scrolling left reveals real older
+    # candles instead of hitting empty space.
+    if len(idx) > num_bars:
+        initial_range = [idx[-num_bars], idx[-1]]
+    else:
+        initial_range = [idx[0], idx[-1]]
+    fig.update_xaxes(range=initial_range, row=1, col=1)
+    fig.update_xaxes(range=initial_range, row=2, col=1)
+
     fig.update_layout(
         height=700,
         template="plotly_dark",
@@ -224,14 +234,15 @@ def fetch_and_display():
         latest_rsi = float(latest['RSI_9']) if not pd.isna(latest['RSI_9']) else float('nan')
 
         col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Latest Price", f"{latest_close:.2f}")
-        col2.metric("3-EMA (Price)", f"{latest_ema:.2f}")
-        col3.metric("21-WMA (Price)", f"{latest_wma:.2f}" if not pd.isna(latest_wma) else "N/A")
-        col4.metric("9-RSI", f"{latest_rsi:.2f}" if not pd.isna(latest_rsi) else "N/A")
+        col1.metric("Last Traded Price", f"{latest_close:.2f}")
+        col2.metric("RSI (9)", f"{latest_rsi:.2f}" if not pd.isna(latest_rsi) else "N/A")
+        col3.metric("PRICE (3-EMA of RSI)", f"{float(latest['RSI_EMA_3']):.2f}" if not pd.isna(latest['RSI_EMA_3']) else "N/A")
+        col4.metric("21-WMA of RSI", f"{float(latest['RSI_WMA_21']):.2f}" if not pd.isna(latest['RSI_WMA_21']) else "N/A")
 
         st.plotly_chart(
             build_chart(
-                data.tail(num_bars),
+                data,
+                num_bars=num_bars,
                 is_intraday=(interval in ["1m", "5m", "10m", "15m", "30m", "1h", "2h", "3h", "4h"])
             ),
             use_container_width=True,
@@ -312,6 +323,68 @@ def get_nifty500_symbols():
         return symbols
     except Exception:
         return FALLBACK_SYMBOLS
+
+
+# Market-cap based category files, in the display/sort order requested
+CATEGORY_FILES = [
+    ("NIFTY 50", "ind_nifty50list.csv"),
+    ("NIFTY NEXT 50", "ind_niftynext50list.csv"),
+    ("NIFTY MIDCAP 250", "ind_niftymidcap250list.csv"),
+    ("NIFTY SMALLCAP 250", "ind_niftysmallcap250list.csv"),
+]
+CATEGORY_ORDER = [c[0] for c in CATEGORY_FILES] + ["OTHER (NIFTY 500)"]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_stock_categories():
+    """Fetch each market-cap category's live constituent list from NSE and
+    build a symbol -> category lookup. If a stock appears in more than one
+    list, the higher (larger market-cap) category wins."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    category_map = {}
+    category_symbol_order = {}
+    session = requests.Session()
+    session.headers.update(headers)
+    try:
+        session.get("https://www.nseindia.com", timeout=10)
+    except Exception:
+        pass
+
+    for name, fname in CATEGORY_FILES:
+        try:
+            url = f"https://nsearchives.nseindia.com/content/indices/{fname}"
+            resp = session.get(url, timeout=15)
+            resp.raise_for_status()
+            df = pd.read_csv(io.StringIO(resp.text))
+            syms = df["Symbol"].astype(str).str.strip().tolist()
+        except Exception:
+            syms = []
+        category_symbol_order[name] = syms
+        for s in syms:
+            if s not in category_map:  # first (highest-priority) category wins
+                category_map[s] = name
+
+    return category_map, category_symbol_order
+
+
+def sort_stocks_by_category(df, category_map, category_symbol_order):
+    """Sort rows: NIFTY 50 block first (in NSE's published list order),
+    then NIFTY NEXT 50, then MIDCAP 250, then SMALLCAP 250, then leftovers."""
+    def rank_key(symbol):
+        cat = category_map.get(symbol, "OTHER (NIFTY 500)")
+        cat_rank = CATEGORY_ORDER.index(cat) if cat in CATEGORY_ORDER else len(CATEGORY_ORDER)
+        within_list = category_symbol_order.get(cat, [])
+        sym_rank = within_list.index(symbol) if symbol in within_list else 9999
+        return (cat_rank, sym_rank)
+
+    df = df.copy()
+    df["_sort_key"] = df["Symbol"].apply(rank_key)
+    df = df.sort_values("_sort_key").drop(columns=["_sort_key"]).reset_index(drop=True)
+    return df
 
 
 # Shared signal -> color mapping (hex, used for both on-screen table and Excel)
@@ -473,14 +546,37 @@ if st.button("▶️ Run / Refresh Scanner"):
             name_map = dict(zip(index_symbols, index_names))
             idx_df.insert(0, "Index", idx_df["Symbol"].map(name_map))
             idx_df = idx_df.drop(columns=["Symbol"])
+            idx_df.insert(0, "Sr. No.", range(1, len(idx_df) + 1))
         st.session_state.scanner_index_df = idx_df
+
+    with st.spinner("Fetching Nifty 50 / Next 50 / Midcap 250 / Smallcap 250 category lists..."):
+        category_map, category_symbol_order = get_stock_categories()
 
     with st.spinner("Scanning Nifty 500 stocks (this can take a few minutes)..."):
         nifty500 = get_nifty500_symbols()
         stocks_df = scan_symbols(nifty500, yf_suffix=".NS", interval=scanner_interval)
+        if not stocks_df.empty:
+            stocks_df = sort_stocks_by_category(stocks_df, category_map, category_symbol_order)
+            stocks_df.insert(0, "Category", stocks_df["Symbol"].map(
+                lambda s: category_map.get(s, "OTHER (NIFTY 500)")
+            ))
+            stocks_df.insert(0, "Sr. No.", range(1, len(stocks_df) + 1))
+            # Column order: Sr. No., Symbol (frozen pair), then Category, then data
+            cols = ["Sr. No.", "Symbol", "Category"] + [
+                c for c in stocks_df.columns if c not in ("Sr. No.", "Symbol", "Category")
+            ]
+            stocks_df = stocks_df[cols]
         st.session_state.scanner_stocks_df = stocks_df
 
     st.session_state.scanner_interval_used = scanner_interval
+
+
+def display_frozen(df, name_col):
+    """Pin 'Sr. No.' and the name column (Index/Symbol) while the rest of
+    the columns stay horizontally scrollable, by making them the index."""
+    df2 = df.set_index(["Sr. No.", name_col])
+    return style_signal_rows(df2)
+
 
 if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
     st.caption(f"Data timeframe: **{st.session_state.scanner_interval_used}**")
@@ -488,21 +584,21 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
     tab_all, tab_idx, tab_stocks = st.tabs(["All", "Indexes", "Nifty 500 Stocks"])
 
     with tab_idx:
-        st.dataframe(style_signal_rows(st.session_state.scanner_index_df), use_container_width=True)
+        st.dataframe(display_frozen(st.session_state.scanner_index_df, "Index"), use_container_width=True)
 
     with tab_stocks:
-        st.dataframe(style_signal_rows(st.session_state.scanner_stocks_df), use_container_width=True)
+        st.dataframe(display_frozen(st.session_state.scanner_stocks_df, "Symbol"), use_container_width=True)
 
     with tab_all:
         st.write("**Indexes**")
-        st.dataframe(style_signal_rows(st.session_state.scanner_index_df), use_container_width=True)
+        st.dataframe(display_frozen(st.session_state.scanner_index_df, "Index"), use_container_width=True)
         st.write("**Nifty 500 Stocks**")
-        st.dataframe(style_signal_rows(st.session_state.scanner_stocks_df), use_container_width=True)
+        st.dataframe(display_frozen(st.session_state.scanner_stocks_df, "Symbol"), use_container_width=True)
 
     # ---- Download as a single Excel file with 2 separate sheets ----
     from openpyxl.styles import Font
 
-    def color_code_sheet(worksheet, df):
+    def color_code_sheet(worksheet, df, freeze_cols=2):
         if "Signal" not in df.columns:
             return
         numeric_col_idxs = [
@@ -516,13 +612,17 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
                 cell.font = Font(color=color)
                 if col_idx in numeric_col_idxs:
                     cell.number_format = "0.00"
+        # Freeze the first `freeze_cols` columns (Sr. No. + Symbol/Index) and header row
+        from openpyxl.utils import get_column_letter
+        freeze_cell = f"{get_column_letter(freeze_cols + 1)}2"
+        worksheet.freeze_panes = freeze_cell
 
     excel_buffer = io.BytesIO()
     with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
         st.session_state.scanner_index_df.to_excel(writer, sheet_name="Indexes", index=False)
         st.session_state.scanner_stocks_df.to_excel(writer, sheet_name="Nifty500_Stocks", index=False)
-        color_code_sheet(writer.sheets["Indexes"], st.session_state.scanner_index_df)
-        color_code_sheet(writer.sheets["Nifty500_Stocks"], st.session_state.scanner_stocks_df)
+        color_code_sheet(writer.sheets["Indexes"], st.session_state.scanner_index_df, freeze_cols=2)
+        color_code_sheet(writer.sheets["Nifty500_Stocks"], st.session_state.scanner_stocks_df, freeze_cols=2)
     excel_buffer.seek(0)
 
     st.download_button(
