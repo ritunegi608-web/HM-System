@@ -91,21 +91,19 @@ symbol = st.sidebar.text_input(
 )
 
 st.sidebar.subheader("📋 Copy a ticker")
-_side_tab_idx, _side_tab_stocks = st.sidebar.tabs(["Indexes", "Nifty 500 Stocks"])
-with _side_tab_idx:
-    _idx_copy_df = pd.DataFrame({
-        "Symbol": list(MAJOR_INDEXES.keys()),
-        "Yahoo Name": list(MAJOR_INDEXES.values()),
-    })
-    st.dataframe(_idx_copy_df, use_container_width=True, hide_index=True)
-with _side_tab_stocks:
+with st.sidebar.expander("Indexes"):
+    _idx_lines = "\n".join(
+        f"{name}: {tkr}" for name, tkr in MAJOR_INDEXES.items()
+    )
+    st.code(_idx_lines, language=None)
+
+with st.sidebar.expander("Nifty 500 Stocks"):
     with st.spinner("Loading Nifty 500 list from NSE..."):
         _n500_symbols, _n500_names = get_nifty500_details()
-    _stocks_copy_df = pd.DataFrame({
-        "Symbol": [_n500_names.get(s, s) for s in _n500_symbols],
-        "Yahoo Name": [f"{s}.NS" for s in _n500_symbols],
-    })
-    st.dataframe(_stocks_copy_df, use_container_width=True, hide_index=True)
+    _stocks_lines = "\n".join(
+        f"{_n500_names.get(s, s)}: {s}.NS" for s in _n500_symbols
+    )
+    st.code(_stocks_lines, language=None)
 
 # Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
 # We fetch the closest available candle size and combine ("resample")
@@ -359,12 +357,20 @@ def fetch_and_display():
         )
 
         with st.expander("Raw Data (latest rows)"):
-            st.dataframe(
+            _fo_symbols = get_fo_symbols()
+            _raw = (
                 data[["Close", "RSI_9", "RSI_EMA_3", "RSI_WMA_21"]]
                 .rename(columns={"Close": "Last Traded Price"})
                 .tail(15).sort_index(ascending=False)
-                .style.format("{:.2f}")
             )
+            _raw = _raw.reset_index().rename(columns={_raw.index.name or "index": "Date"})
+            _raw.insert(0, "Symbol", symbol)
+            _raw["Category"] = get_category(symbol, _fo_symbols)
+            _raw = _raw.set_index(["Symbol", "Date"])
+            st.dataframe(_raw.style.format({
+                "Last Traded Price": "{:.2f}", "RSI_9": "{:.2f}",
+                "RSI_EMA_3": "{:.2f}", "RSI_WMA_21": "{:.2f}"
+            }))
 
         st.caption(f"Last updated: {pd.Timestamp.now()}")
 
@@ -375,6 +381,37 @@ def fetch_and_display():
 # ============================================================
 # ---------- Market Scanner: Indexes + Nifty 500 ----------
 # ============================================================
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_fo_symbols():
+    """Fetch the live list of F&O (Futures & Options) eligible symbols
+    from NSE. Returns a set of bare symbols (no .NS). Empty set on failure
+    (in which case every stock will show as 'Cash' until it succeeds)."""
+    url = "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        session = requests.Session()
+        session.headers.update(headers)
+        session.get("https://www.nseindia.com", timeout=10)
+        resp = session.get(url, timeout=15)
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.text))
+        df.columns = [c.strip() for c in df.columns]
+        syms = df["SYMBOL"].astype(str).str.strip().tolist()
+        return set(syms)
+    except Exception:
+        return set()
+
+
+def get_category(symbol, fo_symbols):
+    """F&O if the (bare, no .NS/^) symbol trades in Futures & Options, else Cash."""
+    bare = symbol.replace(".NS", "").lstrip("^")
+    return "F&O" if bare in fo_symbols else "Cash"
+
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_nifty500_symbols():
@@ -601,6 +638,9 @@ if "scanner_interval_used" not in st.session_state:
     st.session_state.scanner_interval_used = None
 
 if st.button("▶️ Run / Refresh Scanner"):
+    with st.spinner("Fetching F&O eligible stock list from NSE..."):
+        fo_symbols = get_fo_symbols()
+
     with st.spinner("Scanning major indexes..."):
         index_names = list(MAJOR_INDEXES.keys())
         index_symbols = list(MAJOR_INDEXES.values())
@@ -612,6 +652,9 @@ if st.button("▶️ Run / Refresh Scanner"):
             # easy to identify the row while it's pinned during scrolling.
             idx_df["Yahoo Name"] = idx_df["Symbol"]
             idx_df["Symbol"] = idx_df["Symbol"].map(name_map)
+            # Indexes aren't individually "F&O" or "Cash" stocks -- they're
+            # benchmarks with their own separate index-futures contracts.
+            idx_df["Category"] = "Index"
             idx_df.insert(0, "Sr. No.", range(1, len(idx_df) + 1))
         st.session_state.scanner_index_df = idx_df
 
@@ -626,19 +669,24 @@ if st.button("▶️ Run / Refresh Scanner"):
         stocks_df = scan_symbols(nifty500, yf_suffix=".NS", interval=scanner_interval)
         if not stocks_df.empty:
             stocks_df = sort_stocks_by_category(stocks_df, category_map, category_symbol_order)
-            stocks_df.insert(0, "Category", stocks_df["Symbol"].map(
+            stocks_df.insert(0, "Market Cap Category", stocks_df["Symbol"].map(
                 lambda s: category_map.get(s, "OTHER (NIFTY 500)")
             ))
+            # F&O vs Cash, based on the bare symbol (before it's overwritten
+            # with the company name below)
+            fo_cash_col = stocks_df["Symbol"].map(lambda s: get_category(s, fo_symbols))
             stocks_df.insert(0, "Sr. No.", range(1, len(stocks_df) + 1))
             # "Yahoo Name" holds the actual working ticker (with .NS) to copy
             # into the sidebar symbol box. "Symbol" holds the company name.
             stocks_df["Yahoo Name"] = stocks_df["Symbol"] + ".NS"
             stocks_df["Symbol"] = stocks_df["Symbol"].map(nifty500_names).fillna(stocks_df["Symbol"])
-            # Column order: Sr. No., Symbol (frozen pair), Category, data..., Yahoo Name (last)
-            cols = ["Sr. No.", "Symbol", "Category"] + [
+            stocks_df["Category"] = fo_cash_col
+            # Column order: Sr. No., Symbol (frozen pair), Market Cap Category,
+            # data..., Yahoo Name, Category (F&O/Cash) -- last
+            cols = ["Sr. No.", "Symbol", "Market Cap Category"] + [
                 c for c in stocks_df.columns
-                if c not in ("Sr. No.", "Symbol", "Category", "Yahoo Name")
-            ] + ["Yahoo Name"]
+                if c not in ("Sr. No.", "Symbol", "Market Cap Category", "Yahoo Name", "Category")
+            ] + ["Yahoo Name", "Category"]
             stocks_df = stocks_df[cols]
         st.session_state.scanner_stocks_df = stocks_df
 
