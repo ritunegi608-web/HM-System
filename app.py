@@ -389,17 +389,18 @@ def fetch_and_display():
                 .tail(15).sort_index(ascending=False)
             )
             _raw = _raw.reset_index().rename(columns={_raw.index.name or "index": "Date"})
-            _raw["Date"] = _raw["Date"].astype(str)  # plain text -- datetime values don't pin as an index column reliably
+            # Show time too for intraday intervals; date-only for daily/weekly/monthly
+            _is_intraday_raw = interval in ["1m", "5m", "10m", "15m", "30m", "1h", "2h", "3h", "4h"]
+            _date_fmt = "%Y-%m-%d %H:%M" if _is_intraday_raw else "%Y-%m-%d"
+            _raw["Date"] = pd.to_datetime(_raw["Date"]).dt.strftime(_date_fmt)
             _raw.insert(0, "Symbol", symbol)
             _raw["Category"] = "Index" if symbol.startswith("^") else get_category(symbol, _fo_symbols)
-            _raw = _raw.set_index(["Symbol", "Date"])
-            st.dataframe(
-                _raw.style.format({
-                    "Last Traded Price": "{:.2f}", "RSI_9": "{:.2f}",
-                    "RSI_EMA_3": "{:.2f}", "RSI_WMA_21": "{:.2f}"
-                }),
-                use_container_width=True
-            )
+
+            _raw_styler = _raw.style.format({
+                "Last Traded Price": "{:.2f}", "RSI_9": "{:.2f}",
+                "RSI_EMA_3": "{:.2f}", "RSI_WMA_21": "{:.2f}"
+            })
+            render_pinned_table(_raw, ["Symbol", "Date"], styler=_raw_styler)
 
         st.caption(f"Last updated: {pd.Timestamp.now()}")
 
@@ -550,6 +551,29 @@ def get_scanner_signal(rsi, price, wma):
         return "CORRECTION/SHORT COVERING"
     else:
         return "WAIT"
+
+
+def render_pinned_table(df, pin_cols, styler=None):
+    """Show a dataframe with the given columns pinned (frozen) while
+    scrolling horizontally. Uses Streamlit's column_config pinning where
+    available; falls back to a MultiIndex (older Streamlit versions) if
+    'pinned' isn't supported yet, so the app never crashes either way."""
+    try:
+        col_config = {c: st.column_config.Column(pinned=True) for c in pin_cols}
+        st.dataframe(
+            styler if styler is not None else df,
+            use_container_width=True,
+            hide_index=True,
+            column_config=col_config,
+        )
+    except TypeError:
+        df2 = df.set_index(pin_cols)
+        if styler is not None:
+            # rebuild styling on the reindexed frame
+            df2 = style_signal_rows(df2) if "Signal" in df.columns else df2.style.format(
+                {c: "{:.2f}" for c in df.select_dtypes(include="number").columns}
+            )
+        st.dataframe(df2, use_container_width=True)
 
 
 def style_signal_rows(df):
@@ -737,14 +761,13 @@ def shorten_name(name, max_words=4):
 
 
 def display_frozen(df, name_col="Symbol"):
-    """Pin 'Sr. No.' and the Symbol column while the rest of the columns
-    (including Yahoo Name at the end) stay horizontally scrollable.
+    """Show 'Sr. No.' and the Symbol column pinned while the rest of the
+    columns (including Yahoo Name at the end) stay horizontally scrollable.
     Long names are shortened for display only -- the underlying data
     (used for the Excel download) is left untouched."""
     df2 = df.copy()
     df2[name_col] = df2[name_col].apply(shorten_name)
-    df2 = df2.set_index(["Sr. No.", name_col])
-    return style_signal_rows(df2)
+    render_pinned_table(df2, ["Sr. No.", name_col], styler=style_signal_rows(df2))
 
 
 if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
@@ -753,16 +776,16 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
     tab_all, tab_idx, tab_stocks = st.tabs(["All", "Indexes", "Nifty 500 Stocks"])
 
     with tab_idx:
-        st.dataframe(display_frozen(st.session_state.scanner_index_df), use_container_width=True)
+        display_frozen(st.session_state.scanner_index_df)
 
     with tab_stocks:
-        st.dataframe(display_frozen(st.session_state.scanner_stocks_df), use_container_width=True)
+        display_frozen(st.session_state.scanner_stocks_df)
 
     with tab_all:
         st.write("**Indexes**")
-        st.dataframe(display_frozen(st.session_state.scanner_index_df), use_container_width=True)
+        display_frozen(st.session_state.scanner_index_df)
         st.write("**Nifty 500 Stocks**")
-        st.dataframe(display_frozen(st.session_state.scanner_stocks_df), use_container_width=True)
+        display_frozen(st.session_state.scanner_stocks_df)
 
     # ---- Download as a single Excel file with 2 separate sheets ----
     from openpyxl.styles import Font
