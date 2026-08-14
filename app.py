@@ -92,18 +92,20 @@ symbol = st.sidebar.text_input(
 
 st.sidebar.subheader("📋 Copy a ticker")
 with st.sidebar.expander("Indexes"):
-    _idx_lines = "\n".join(
-        f"{name}: {tkr}" for name, tkr in MAJOR_INDEXES.items()
-    )
-    st.code(_idx_lines, language=None)
+    _idx_search = st.text_input("🔍 Search index", key="idx_search", placeholder="e.g. bank, next 50")
+    _idx_all_lines = [f"{name}: {tkr}" for name, tkr in MAJOR_INDEXES.items()]
+    if _idx_search:
+        _idx_all_lines = [l for l in _idx_all_lines if _idx_search.lower() in l.lower()]
+    st.code("\n".join(_idx_all_lines) if _idx_all_lines else "No match found.", language=None)
 
 with st.sidebar.expander("Nifty 500 Stocks"):
+    _stock_search = st.text_input("🔍 Search stock", key="stock_search", placeholder="e.g. reliance, TCS")
     with st.spinner("Loading Nifty 500 list from NSE..."):
         _n500_symbols, _n500_names = get_nifty500_details()
-    _stocks_lines = "\n".join(
-        f"{_n500_names.get(s, s)}: {s}.NS" for s in _n500_symbols
-    )
-    st.code(_stocks_lines, language=None)
+    _stocks_all_lines = [f"{_n500_names.get(s, s)}: {s}.NS" for s in _n500_symbols]
+    if _stock_search:
+        _stocks_all_lines = [l for l in _stocks_all_lines if _stock_search.lower() in l.lower()]
+    st.code("\n".join(_stocks_all_lines) if _stocks_all_lines else "No match found.", language=None)
 
 # Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
 # We fetch the closest available candle size and combine ("resample")
@@ -365,12 +367,15 @@ def fetch_and_display():
             )
             _raw = _raw.reset_index().rename(columns={_raw.index.name or "index": "Date"})
             _raw.insert(0, "Symbol", symbol)
-            _raw["Category"] = get_category(symbol, _fo_symbols)
+            _raw["Category"] = "Index" if symbol.startswith("^") else get_category(symbol, _fo_symbols)
             _raw = _raw.set_index(["Symbol", "Date"])
-            st.dataframe(_raw.style.format({
-                "Last Traded Price": "{:.2f}", "RSI_9": "{:.2f}",
-                "RSI_EMA_3": "{:.2f}", "RSI_WMA_21": "{:.2f}"
-            }))
+            st.dataframe(
+                _raw.style.format({
+                    "Last Traded Price": "{:.2f}", "RSI_9": "{:.2f}",
+                    "RSI_EMA_3": "{:.2f}", "RSI_WMA_21": "{:.2f}"
+                }),
+                use_container_width=True
+            )
 
         st.caption(f"Last updated: {pd.Timestamp.now()}")
 
@@ -693,10 +698,28 @@ if st.button("▶️ Run / Refresh Scanner"):
     st.session_state.scanner_interval_used = scanner_interval
 
 
+def shorten_name(name, max_words=4):
+    """Trim a long company/index name to at most `max_words` words for
+    on-screen display (the full name still goes into the Excel export
+    unchanged). Drops a trailing joining word like 'of'/'and' if it lands
+    as the last word after trimming."""
+    if not isinstance(name, str):
+        return name
+    stopwords = {"of", "and", "the", "for", "in", "&"}
+    words = name.split()[:max_words]
+    if words and words[-1].strip(".,").lower() in stopwords:
+        words = words[:-1]
+    return " ".join(words)
+
+
 def display_frozen(df, name_col="Symbol"):
     """Pin 'Sr. No.' and the Symbol column while the rest of the columns
-    (including Yahoo Name at the end) stay horizontally scrollable."""
-    df2 = df.set_index(["Sr. No.", name_col])
+    (including Yahoo Name at the end) stay horizontally scrollable.
+    Long names are shortened for display only -- the underlying data
+    (used for the Excel download) is left untouched."""
+    df2 = df.copy()
+    df2[name_col] = df2[name_col].apply(shorten_name)
+    df2 = df2.set_index(["Sr. No.", name_col])
     return style_signal_rows(df2)
 
 
