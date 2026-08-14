@@ -93,19 +93,42 @@ symbol = st.sidebar.text_input(
 st.sidebar.subheader("📋 Copy a ticker")
 with st.sidebar.expander("Indexes"):
     _idx_search = st.text_input("🔍 Search index", key="idx_search", placeholder="e.g. bank, next 50")
-    _idx_all_lines = [f"{name}: {tkr}" for name, tkr in MAJOR_INDEXES.items()]
+    _idx_options = list(MAJOR_INDEXES.items())  # (name, ticker) pairs
     if _idx_search:
-        _idx_all_lines = [l for l in _idx_all_lines if _idx_search.lower() in l.lower()]
-    st.code("\n".join(_idx_all_lines) if _idx_all_lines else "No match found.", language=None)
+        _idx_options = [
+            (n, t) for n, t in _idx_options
+            if _idx_search.lower() in n.lower() or _idx_search.lower() in t.lower()
+        ]
+    if _idx_options:
+        _idx_pick = st.selectbox(
+            "Select", [f"{n}: {t}" for n, t in _idx_options], key="idx_pick",
+            label_visibility="collapsed"
+        )
+        _idx_pick_ticker = _idx_pick.rsplit(": ", 1)[-1]
+        st.code(_idx_pick_ticker, language=None)  # only the ticker -- nothing else to copy
+    else:
+        st.caption("No match found.")
 
 with st.sidebar.expander("Nifty 500 Stocks"):
     _stock_search = st.text_input("🔍 Search stock", key="stock_search", placeholder="e.g. reliance, TCS")
     with st.spinner("Loading Nifty 500 list from NSE..."):
         _n500_symbols, _n500_names = get_nifty500_details()
-    _stocks_all_lines = [f"{_n500_names.get(s, s)}: {s}.NS" for s in _n500_symbols]
+    _stock_options = [(_n500_names.get(s, s), f"{s}.NS") for s in _n500_symbols]
     if _stock_search:
-        _stocks_all_lines = [l for l in _stocks_all_lines if _stock_search.lower() in l.lower()]
-    st.code("\n".join(_stocks_all_lines) if _stocks_all_lines else "No match found.", language=None)
+        _stock_options = [
+            (n, t) for n, t in _stock_options
+            if _stock_search.lower() in n.lower() or _stock_search.lower() in t.lower()
+        ]
+    if _stock_options:
+        _stock_pick = st.selectbox(
+            "Select", [f"{n}: {t}" for n, t in _stock_options], key="stock_pick",
+            label_visibility="collapsed"
+        )
+        _stock_pick_ticker = _stock_pick.rsplit(": ", 1)[-1]
+        st.code(_stock_pick_ticker, language=None)  # only the ticker -- nothing else to copy
+    else:
+        st.caption("No match found.")
+        st.caption("No match found.")
 
 # Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
 # We fetch the closest available candle size and combine ("resample")
@@ -366,6 +389,7 @@ def fetch_and_display():
                 .tail(15).sort_index(ascending=False)
             )
             _raw = _raw.reset_index().rename(columns={_raw.index.name or "index": "Date"})
+            _raw["Date"] = _raw["Date"].astype(str)  # plain text -- datetime values don't pin as an index column reliably
             _raw.insert(0, "Symbol", symbol)
             _raw["Category"] = "Index" if symbol.startswith("^") else get_category(symbol, _fo_symbols)
             _raw = _raw.set_index(["Symbol", "Date"])
