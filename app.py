@@ -241,9 +241,46 @@ def fetch_data(symbol, interval):
 
 
 # ---------- Chart (TradingView "Hilega Milega" style) ----------
-def build_chart(data, num_bars=45, is_intraday=False):
+def build_chart(data, num_bars=45, interval="1d"):
     idx = data.index
-    close = data["Close"]
+    n = len(data)
+    x = list(range(n))  # sequential positions -- every candle is equally
+    # spaced regardless of real elapsed time, so weekends/off-hours/uneven
+    # resampled bins can never create gaps, overlaps, or squeezed candles
+    # (this is how TradingView spaces candles too -- only the axis LABELS
+    # show the real date/time, adapted to the chosen timeframe).
+
+    is_intraday = interval in ["1m", "5m", "10m", "15m", "30m", "1h", "2h", "3h", "4h"]
+    fine_intraday = interval in ["1m", "5m", "10m", "15m", "30m"]
+
+    # Full label (used on hover) and a shorter tick label, both matched to
+    # the selected timeframe -- like TradingView adapts label granularity
+    # to the chart's zoom/interval.
+    if interval in ["1wk", "1mo"]:
+        labels = [d.strftime("%b %Y") for d in idx]
+        tick_labels = labels
+    elif interval == "1d":
+        labels = [d.strftime("%d-%b-%Y") for d in idx]
+        tick_labels = [d.strftime("%d-%b") for d in idx]
+    elif is_intraday:
+        labels = [d.strftime("%d-%b-%Y %H:%M") for d in idx]
+        if fine_intraday:
+            # show just the time, except the first candle of a new day
+            # (then show the date too, like TradingView's day dividers)
+            tick_labels = []
+            prev_day = None
+            for d in idx:
+                if d.date() != prev_day:
+                    tick_labels.append(d.strftime("%d-%b %H:%M"))
+                    prev_day = d.date()
+                else:
+                    tick_labels.append(d.strftime("%H:%M"))
+        else:
+            tick_labels = [d.strftime("%d-%b %H:%M") for d in idx]
+    else:
+        labels = [d.strftime("%d-%b-%Y") for d in idx]
+        tick_labels = labels
+
     rsi = data["RSI_9"]
     rsi_wma = data["RSI_WMA_21"]
     rsi_ema = data["RSI_EMA_3"]
@@ -263,68 +300,72 @@ def build_chart(data, num_bars=45, is_intraday=False):
     # ---- Upper section: Price as a candlestick chart ----
     fig.add_trace(
         go.Candlestick(
-            x=idx, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"],
-            name="Price",
+            x=x, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"],
+            name="Price", text=labels, hoverinfo="x+text+open+high+low+close",
             increasing_line_color="#26A69A", decreasing_line_color="#EF5350"
         ),
         row=1, col=1
     )
 
     # ---- Lower section: RSI zones (orange above 50, light green below 50) ----
-    fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
+    fig.add_trace(go.Scatter(x=x, y=midline, line=dict(width=0), showlegend=False,
                               hoverinfo="skip"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=idx, y=rsi_upper, line=dict(width=0), fill="tonexty",
+    fig.add_trace(go.Scatter(x=x, y=rsi_upper, line=dict(width=0), fill="tonexty",
                               fillcolor="rgba(144,238,144,0.35)", name="Overbought (>50)",
                               showlegend=True, hoverinfo="skip"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
+    fig.add_trace(go.Scatter(x=x, y=midline, line=dict(width=0), showlegend=False,
                               hoverinfo="skip"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=idx, y=rsi_lower, line=dict(width=0), fill="tonexty",
+    fig.add_trace(go.Scatter(x=x, y=rsi_lower, line=dict(width=0), fill="tonexty",
                               fillcolor="rgba(255,200,120,0.35)", name="Oversold (<50)",
                               showlegend=True, hoverinfo="skip"), row=2, col=1)
 
     # Midline at 50
     fig.add_trace(
-        go.Scatter(x=idx, y=midline, mode="lines", line=dict(color="gray", width=1, dash="dot"),
+        go.Scatter(x=x, y=midline, mode="lines", line=dict(color="gray", width=1, dash="dot"),
                    name="Midline (50)"), row=2, col=1
     )
 
     # RSI line itself
     fig.add_trace(
-        go.Scatter(x=idx, y=rsi, mode="lines", line=dict(color="white", width=1.1),
-                   name="RSI (9)"), row=2, col=1
+        go.Scatter(x=x, y=rsi, mode="lines", line=dict(color="white", width=1.1),
+                   name="RSI (9)", text=labels, hovertemplate="%{text}<br>RSI: %{y:.2f}<extra></extra>"),
+        row=2, col=1
     )
 
     # WMA(21) and EMA(3) of the RSI itself -- same 0-100 scale, like the
     # "Hilega Milega" TradingView indicator (close, 9, 3, 21)
     fig.add_trace(
-        go.Scatter(x=idx, y=rsi_wma, mode="lines", line=dict(color="red", width=1),
-                   name="21 WMA (of RSI)"), row=2, col=1
+        go.Scatter(x=x, y=rsi_wma, mode="lines", line=dict(color="red", width=1),
+                   name="21 WMA (of RSI)", text=labels,
+                   hovertemplate="%{text}<br>WMA: %{y:.2f}<extra></extra>"),
+        row=2, col=1
     )
     fig.add_trace(
-        go.Scatter(x=idx, y=rsi_ema, mode="lines", line=dict(color="violet", width=1),
-                   name="3 EMA (of RSI)"), row=2, col=1
+        go.Scatter(x=x, y=rsi_ema, mode="lines", line=dict(color="violet", width=1),
+                   name="3 EMA (of RSI)", text=labels,
+                   hovertemplate="%{text}<br>EMA: %{y:.2f}<extra></extra>"),
+        row=2, col=1
     )
 
     fig.update_yaxes(title_text="Price", row=1, col=1, fixedrange=True)
     fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, fixedrange=True)
     fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
 
-    # Remove blank gaps for days/hours when the market is closed
-    # (weekends, and outside 9:15-15:30 for intraday candles) so
-    # scrolling left never lands on empty space.
-    rangebreaks = [dict(bounds=["sat", "mon"])]
-    if is_intraday:
-        rangebreaks.append(dict(bounds=[15.5, 9.25], pattern="hour"))
-    fig.update_xaxes(rangebreaks=rangebreaks, row=1, col=1)
-    fig.update_xaxes(rangebreaks=rangebreaks, row=2, col=1)
+    # Custom tick labels along the x-axis (a subset, so they don't overlap)
+    max_ticks = 8
+    step = max(1, n // max_ticks)
+    tickvals = list(range(0, n, step))
+    ticktext = [tick_labels[i] for i in tickvals]
+    fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext, row=1, col=1)
+    fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext, row=2, col=1)
 
     # Show only the last `num_bars` candles initially, but keep the full
     # fetched history in the figure so scrolling left reveals real older
     # candles instead of hitting empty space.
-    if len(idx) > num_bars:
-        initial_range = [idx[-num_bars], idx[-1]]
+    if n > num_bars:
+        initial_range = [n - num_bars - 0.5, n - 0.5]
     else:
-        initial_range = [idx[0], idx[-1]]
+        initial_range = [-0.5, n - 0.5]
     fig.update_xaxes(range=initial_range, row=1, col=1)
     fig.update_xaxes(range=initial_range, row=2, col=1)
 
@@ -375,7 +416,7 @@ def fetch_and_display():
             build_chart(
                 chart_data,
                 num_bars=num_bars,
-                is_intraday=(interval in ["1m", "5m", "10m", "15m", "30m", "1h", "2h", "3h", "4h"])
+                interval=interval
             ),
             use_container_width=True,
             config={
@@ -582,12 +623,15 @@ def render_pinned_table(df, pin_cols, row_color_col=None):
     PIN_WIDTH = 130
     parts = [
         '<div style="overflow-x:auto; max-width:100%; border:1px solid #333; border-radius:4px;">',
-        '<table style="border-collapse:collapse; font-size:13px; color:#eee; width:max-content;">',
+        # border-collapse:collapse breaks position:sticky (collapsed borders
+        # let scrolled content show through pinned cells) -- separate +
+        # zero spacing avoids that while still looking like one solid grid.
+        '<table style="border-collapse:separate; border-spacing:0; font-size:13px; color:#eee; width:max-content;">',
         "<thead><tr>"
     ]
     left = 0
     for i, c in enumerate(ordered):
-        style = ("padding:6px 10px; border:1px solid #333; background:#161b22; "
+        style = ("padding:6px 10px; border:1px solid #333; background-color:#161b22; "
                  "white-space:nowrap; text-align:left;")
         if i < n_pin:
             style += f"position:sticky; left:{left}px; z-index:3;"
@@ -603,7 +647,8 @@ def render_pinned_table(df, pin_cols, row_color_col=None):
         parts.append("<tr>")
         left = 0
         for i, c in enumerate(ordered):
-            style = f"padding:6px 10px; border:1px solid #333; white-space:nowrap; background:#0e1117; {color_style}"
+            bg = "#1a1f27" if i < n_pin else "#0e1117"
+            style = f"padding:6px 10px; border:1px solid #333; white-space:nowrap; background-color:{bg}; {color_style}"
             if i < n_pin:
                 style += f"position:sticky; left:{left}px; z-index:2;"
                 left += PIN_WIDTH
