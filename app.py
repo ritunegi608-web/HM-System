@@ -226,7 +226,10 @@ def fetch_data(symbol, interval):
         data.columns = data.columns.get_level_values(0)
 
     if cfg["resample"]:
-        data = data.resample(cfg["resample"]).agg({
+        # Anchor bins to NSE's 9:15 AM market open (default resample bins
+        # start at midnight, which chops candles into uneven/partial pieces
+        # and made 2h/3h/4h charts look distorted).
+        data = data.resample(cfg["resample"], offset="9h15min").agg({
             "Open": "first",
             "High": "max",
             "Low": "min",
@@ -396,11 +399,7 @@ def fetch_and_display():
             _raw.insert(0, "Symbol", symbol)
             _raw["Category"] = "Index" if symbol.startswith("^") else get_category(symbol, _fo_symbols)
 
-            _raw_styler = _raw.style.format({
-                "Last Traded Price": "{:.2f}", "RSI_9": "{:.2f}",
-                "RSI_EMA_3": "{:.2f}", "RSI_WMA_21": "{:.2f}"
-            })
-            render_pinned_table(_raw, ["Symbol", "Date"], styler=_raw_styler)
+            render_pinned_table(_raw, ["Symbol", "Date"])
 
         st.caption(f"Last updated: {pd.Timestamp.now()}")
 
@@ -553,27 +552,65 @@ def get_scanner_signal(rsi, price, wma):
         return "WAIT"
 
 
-def render_pinned_table(df, pin_cols, styler=None):
-    """Show a dataframe with the given columns pinned (frozen) while
-    scrolling horizontally. Uses Streamlit's column_config pinning where
-    available; falls back to a MultiIndex (older Streamlit versions) if
-    'pinned' isn't supported yet, so the app never crashes either way."""
-    try:
-        col_config = {c: st.column_config.Column(pinned=True) for c in pin_cols}
-        st.dataframe(
-            styler if styler is not None else df,
-            use_container_width=True,
-            hide_index=True,
-            column_config=col_config,
-        )
-    except TypeError:
-        df2 = df.set_index(pin_cols)
-        if styler is not None:
-            # rebuild styling on the reindexed frame
-            df2 = style_signal_rows(df2) if "Signal" in df.columns else df2.style.format(
-                {c: "{:.2f}" for c in df.select_dtypes(include="number").columns}
-            )
-        st.dataframe(df2, use_container_width=True)
+def render_pinned_table(df, pin_cols, row_color_col=None):
+    """Render a dataframe as a plain HTML table with the given leading
+    columns 'stuck' to the left using CSS position:sticky -- this works
+    reliably regardless of the Streamlit version's dataframe-grid support
+    (which turned out not to pin columns consistently). Cell text is also
+    natively selectable/copyable this way.
+    If row_color_col is given (e.g. "Signal"), each row's text color comes
+    from SIGNAL_COLORS_DISPLAY based on that column's value."""
+    import html as _html
+
+    cols = list(df.columns)
+    n_pin = len(pin_cols)
+    # pin_cols must be the first columns, in order
+    ordered = pin_cols + [c for c in cols if c not in pin_cols]
+    df = df[ordered]
+    numeric_cols = set(df.select_dtypes(include="number").columns)
+
+    def fmt(v, col):
+        if pd.isna(v):
+            return ""
+        if col in numeric_cols:
+            try:
+                return f"{float(v):.2f}"
+            except Exception:
+                return str(v)
+        return str(v)
+
+    PIN_WIDTH = 130
+    parts = [
+        '<div style="overflow-x:auto; max-width:100%; border:1px solid #333; border-radius:4px;">',
+        '<table style="border-collapse:collapse; font-size:13px; color:#eee; width:max-content;">',
+        "<thead><tr>"
+    ]
+    left = 0
+    for i, c in enumerate(ordered):
+        style = ("padding:6px 10px; border:1px solid #333; background:#161b22; "
+                 "white-space:nowrap; text-align:left;")
+        if i < n_pin:
+            style += f"position:sticky; left:{left}px; z-index:3;"
+            left += PIN_WIDTH
+        parts.append(f'<th style="{style}">{_html.escape(str(c))}</th>')
+    parts.append("</tr></thead><tbody>")
+
+    for _, row in df.iterrows():
+        color = None
+        if row_color_col:
+            color = SIGNAL_COLORS_DISPLAY.get(row.get(row_color_col, "WAIT"), "#FFFFFF")
+        color_style = f"color:{color};" if color else "color:#eee;"
+        parts.append("<tr>")
+        left = 0
+        for i, c in enumerate(ordered):
+            style = f"padding:6px 10px; border:1px solid #333; white-space:nowrap; background:#0e1117; {color_style}"
+            if i < n_pin:
+                style += f"position:sticky; left:{left}px; z-index:2;"
+                left += PIN_WIDTH
+            parts.append(f'<td style="{style}">{_html.escape(fmt(row[c], c))}</td>')
+        parts.append("</tr>")
+    parts.append("</tbody></table></div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
 
 
 def style_signal_rows(df):
@@ -624,9 +661,10 @@ def scan_symbols(symbols, yf_suffix=".NS", interval="1d"):
             df = df.dropna(how="all")
 
             # Combine smaller candles into the requested bigger duration
-            # (same resample logic as the main single-stock chart)
+            # (same resample logic as the main single-stock chart, anchored
+            # to 9:15 AM market open so buckets aren't uneven/partial)
             if cfg["resample"]:
-                df = df.resample(cfg["resample"]).agg({
+                df = df.resample(cfg["resample"], offset="9h15min").agg({
                     "Open": "first", "High": "max", "Low": "min",
                     "Close": "last", "Volume": "sum"
                 }).dropna(how="all")
@@ -767,7 +805,7 @@ def display_frozen(df, name_col="Symbol"):
     (used for the Excel download) is left untouched."""
     df2 = df.copy()
     df2[name_col] = df2[name_col].apply(shorten_name)
-    render_pinned_table(df2, ["Sr. No.", name_col], styler=style_signal_rows(df2))
+    render_pinned_table(df2, ["Sr. No.", name_col], row_color_col="Signal")
 
 
 if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
