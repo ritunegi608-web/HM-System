@@ -357,15 +357,19 @@ def build_chart(data, num_bars=45, interval="1d"):
         day_mid = midline.loc[day_idx]
         day_upper = rsi_upper.loc[day_idx]
         day_lower = rsi_lower.loc[day_idx]
-        fig.add_trace(go.Scatter(x=day_idx, y=day_mid, line=dict(width=0), showlegend=False,
-                                  hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=day_idx, y=day_upper, line=dict(width=0), fill="tonexty",
+        # mode="lines" is required here: Plotly defaults to "lines+markers"
+        # on traces with few points, which is what caused the round bubble
+        # markers to appear once the fill was split per-day (each day now
+        # has only a handful of points).
+        fig.add_trace(go.Scatter(x=day_idx, y=day_mid, mode="lines", line=dict(width=0),
+                                  showlegend=False, hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=day_idx, y=day_upper, mode="lines", line=dict(width=0), fill="tonexty",
                                   fillcolor="rgba(144,238,144,0.35)", name="Overbought (>50)",
                                   showlegend=first_day, legendgroup="overbought",
                                   hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=day_idx, y=day_mid, line=dict(width=0), showlegend=False,
-                                  hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=day_idx, y=day_lower, line=dict(width=0), fill="tonexty",
+        fig.add_trace(go.Scatter(x=day_idx, y=day_mid, mode="lines", line=dict(width=0),
+                                  showlegend=False, hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=day_idx, y=day_lower, mode="lines", line=dict(width=0), fill="tonexty",
                                   fillcolor="rgba(255,200,120,0.35)", name="Oversold (<50)",
                                   showlegend=first_day, legendgroup="oversold",
                                   hoverinfo="skip"), row=2, col=1)
