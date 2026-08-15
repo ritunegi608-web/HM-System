@@ -198,6 +198,39 @@ def calculate_indicators(df):
     return df
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_nse_holidays():
+    """Fetch NSE's official trading-holiday dates (full market closures --
+    Republic Day, Diwali, etc.) so charts can skip them, same as weekends.
+    Returns a list of 'YYYY-MM-DD' strings; empty list on failure (chart
+    still works fine, just won't hide those specific extra closed days)."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        session = requests.Session()
+        session.headers.update(headers)
+        session.get("https://www.nseindia.com", timeout=10)
+        resp = session.get(
+            "https://www.nseindia.com/api/holiday-master?type=trading", timeout=15
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        segment = payload.get("CM") or payload.get("FO") or []
+        dates = []
+        for h in segment:
+            try:
+                d = pd.to_datetime(h["tradingDate"], format="%d-%b-%Y")
+                dates.append(d.strftime("%Y-%m-%d"))
+            except Exception:
+                continue
+        return dates
+    except Exception:
+        return []
+
+
 # ---------- Data fetch ----------
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_company_name(sym):
@@ -248,42 +281,22 @@ def fetch_data(symbol, interval):
 def build_chart(data, num_bars=45, interval="1d"):
     idx = data.index
     n = len(data)
-    x = list(range(n))  # sequential positions -- every candle is equally
-    # spaced regardless of real elapsed time, so weekends/off-hours/uneven
-    # resampled bins can never create gaps, overlaps, or squeezed candles
-    # (this is how TradingView spaces candles too -- only the axis LABELS
-    # show the real date/time, adapted to the chosen timeframe).
 
     is_intraday = interval in ["1m", "5m", "10m", "15m", "30m", "1h", "2h", "3h", "4h"]
-    fine_intraday = interval in ["1m", "5m", "10m", "15m", "30m"]
 
-    # Full label (used on hover) and a shorter tick label, both matched to
-    # the selected timeframe -- like TradingView adapts label granularity
-    # to the chart's zoom/interval.
+    # Full label shown on hover, matched to the selected timeframe
     if interval in ["1wk", "1mo"]:
         labels = [d.strftime("%b %Y") for d in idx]
-        tick_labels = labels
+        tickformat = "%b %Y"
     elif interval == "1d":
         labels = [d.strftime("%d-%b-%Y") for d in idx]
-        tick_labels = [d.strftime("%d-%b") for d in idx]
+        tickformat = "%d-%b"
     elif is_intraday:
         labels = [d.strftime("%d-%b-%Y %H:%M") for d in idx]
-        if fine_intraday:
-            # show just the time, except the first candle of a new day
-            # (then show the date too, like TradingView's day dividers)
-            tick_labels = []
-            prev_day = None
-            for d in idx:
-                if d.date() != prev_day:
-                    tick_labels.append(d.strftime("%d-%b %H:%M"))
-                    prev_day = d.date()
-                else:
-                    tick_labels.append(d.strftime("%H:%M"))
-        else:
-            tick_labels = [d.strftime("%d-%b %H:%M") for d in idx]
+        tickformat = "%d-%b\n%H:%M"
     else:
         labels = [d.strftime("%d-%b-%Y") for d in idx]
-        tick_labels = labels
+        tickformat = "%d-%b-%Y"
 
     rsi = data["RSI_9"]
     rsi_wma = data["RSI_WMA_21"]
@@ -323,7 +336,7 @@ def build_chart(data, num_bars=45, interval="1d"):
     # ---- Upper section: Price as a candlestick chart ----
     fig.add_trace(
         go.Candlestick(
-            x=x, open=open_plot, high=high_plot, low=low_plot, close=close_plot,
+            x=idx, open=open_plot, high=high_plot, low=low_plot, close=close_plot,
             name="Price", text=labels,
             hovertemplate="%{text}<br>O: %{open:.2f}  H: %{high:.2f}<br>L: %{low:.2f}  C: %{close:.2f}<extra></extra>",
             increasing_line_color="#26A69A", decreasing_line_color="#EF5350"
@@ -332,26 +345,26 @@ def build_chart(data, num_bars=45, interval="1d"):
     )
 
     # ---- Lower section: RSI zones (orange above 50, light green below 50) ----
-    fig.add_trace(go.Scatter(x=x, y=midline, line=dict(width=0), showlegend=False,
+    fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
                               hoverinfo="skip"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x, y=rsi_upper, line=dict(width=0), fill="tonexty",
+    fig.add_trace(go.Scatter(x=idx, y=rsi_upper, line=dict(width=0), fill="tonexty",
                               fillcolor="rgba(144,238,144,0.35)", name="Overbought (>50)",
                               showlegend=True, hoverinfo="skip"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x, y=midline, line=dict(width=0), showlegend=False,
+    fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
                               hoverinfo="skip"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=x, y=rsi_lower, line=dict(width=0), fill="tonexty",
+    fig.add_trace(go.Scatter(x=idx, y=rsi_lower, line=dict(width=0), fill="tonexty",
                               fillcolor="rgba(255,200,120,0.35)", name="Oversold (<50)",
                               showlegend=True, hoverinfo="skip"), row=2, col=1)
 
     # Midline at 50
     fig.add_trace(
-        go.Scatter(x=x, y=midline, mode="lines", line=dict(color="gray", width=1, dash="dot"),
+        go.Scatter(x=idx, y=midline, mode="lines", line=dict(color="gray", width=1, dash="dot"),
                    name="Midline (50)"), row=2, col=1
     )
 
     # RSI line itself
     fig.add_trace(
-        go.Scatter(x=x, y=rsi, mode="lines", line=dict(color="white", width=1.1),
+        go.Scatter(x=idx, y=rsi, mode="lines", line=dict(color="white", width=1.1),
                    name="RSI (9)", text=labels, hovertemplate="%{text}<br>RSI: %{y:.2f}<extra></extra>"),
         row=2, col=1
     )
@@ -359,13 +372,13 @@ def build_chart(data, num_bars=45, interval="1d"):
     # WMA(21) and EMA(3) of the RSI itself -- same 0-100 scale, like the
     # "Hilega Milega" TradingView indicator (close, 9, 3, 21)
     fig.add_trace(
-        go.Scatter(x=x, y=rsi_wma, mode="lines", line=dict(color="red", width=1),
+        go.Scatter(x=idx, y=rsi_wma, mode="lines", line=dict(color="red", width=1),
                    name="21 WMA (of RSI)", text=labels,
                    hovertemplate="%{text}<br>WMA: %{y:.2f}<extra></extra>"),
         row=2, col=1
     )
     fig.add_trace(
-        go.Scatter(x=x, y=rsi_ema, mode="lines", line=dict(color="violet", width=1),
+        go.Scatter(x=idx, y=rsi_ema, mode="lines", line=dict(color="violet", width=1),
                    name="3 EMA (of RSI)", text=labels,
                    hovertemplate="%{text}<br>EMA: %{y:.2f}<extra></extra>"),
         row=2, col=1
@@ -374,22 +387,28 @@ def build_chart(data, num_bars=45, interval="1d"):
     fig.update_yaxes(title_text="Price", row=1, col=1, fixedrange=True)
     fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, fixedrange=True)
     fig.update_xaxes(rangeslider_visible=False, row=1, col=1)
+    fig.update_xaxes(tickformat=tickformat, row=1, col=1)
+    fig.update_xaxes(tickformat=tickformat, row=2, col=1)
 
-    # Custom tick labels along the x-axis (a subset, so they don't overlap)
-    max_ticks = 8
-    step = max(1, n // max_ticks)
-    tickvals = list(range(0, n, step))
-    ticktext = [tick_labels[i] for i in tickvals]
-    fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext, row=1, col=1)
-    fig.update_xaxes(tickmode="array", tickvals=tickvals, ticktext=ticktext, row=2, col=1)
+    # Remove blank gaps so the chart looks continuous, like TradingView:
+    # non-trading hours every day, Saturdays/Sundays, and NSE's official
+    # trading holidays (fetched live from NSE).
+    rangebreaks = [dict(bounds=["sat", "mon"])]
+    if is_intraday:
+        rangebreaks.append(dict(bounds=[15.5, 9.25], pattern="hour"))
+    nse_holidays = get_nse_holidays()
+    if nse_holidays:
+        rangebreaks.append(dict(values=nse_holidays))
+    fig.update_xaxes(rangebreaks=rangebreaks, row=1, col=1)
+    fig.update_xaxes(rangebreaks=rangebreaks, row=2, col=1)
 
     # Show only the last `num_bars` candles initially, but keep the full
     # fetched history in the figure so scrolling left reveals real older
     # candles instead of hitting empty space.
     if n > num_bars:
-        initial_range = [n - num_bars - 0.5, n - 0.5]
+        initial_range = [idx[n - num_bars], idx[-1]]
     else:
-        initial_range = [-0.5, n - 0.5]
+        initial_range = [idx[0], idx[-1]]
     fig.update_xaxes(range=initial_range, row=1, col=1)
     fig.update_xaxes(range=initial_range, row=2, col=1)
 
