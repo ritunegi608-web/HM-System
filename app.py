@@ -301,7 +301,8 @@ def build_chart(data, num_bars=45, interval="1d"):
     fig.add_trace(
         go.Candlestick(
             x=x, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"],
-            name="Price", text=labels, hoverinfo="x+text+open+high+low+close",
+            name="Price", text=labels,
+            hovertemplate="%{text}<br>O: %{open:.2f}  H: %{high:.2f}<br>L: %{low:.2f}  C: %{close:.2f}<extra></extra>",
             increasing_line_color="#26A69A", decreasing_line_color="#EF5350"
         ),
         row=1, col=1
@@ -440,7 +441,7 @@ def fetch_and_display():
             _raw.insert(0, "Symbol", symbol)
             _raw["Category"] = "Index" if symbol.startswith("^") else get_category(symbol, _fo_symbols)
 
-            render_pinned_table(_raw, ["Symbol", "Date"])
+            render_pinned_table(_raw, ["Symbol", "Date"], pin_widths=[100, 160])
 
         st.caption(f"Last updated: {pd.Timestamp.now()}")
 
@@ -593,14 +594,17 @@ def get_scanner_signal(rsi, price, wma):
         return "WAIT"
 
 
-def render_pinned_table(df, pin_cols, row_color_col=None):
+def render_pinned_table(df, pin_cols, row_color_col=None, pin_widths=None):
     """Render a dataframe as a plain HTML table with the given leading
     columns 'stuck' to the left using CSS position:sticky -- this works
     reliably regardless of the Streamlit version's dataframe-grid support
     (which turned out not to pin columns consistently). Cell text is also
     natively selectable/copyable this way.
     If row_color_col is given (e.g. "Signal"), each row's text color comes
-    from SIGNAL_COLORS_DISPLAY based on that column's value."""
+    from SIGNAL_COLORS_DISPLAY based on that column's value.
+    pin_widths: explicit pixel width per pinned column -- the width MUST
+    match the actual rendered cell width exactly, or a gap opens up between
+    pinned columns that scrolled content shows through."""
     import html as _html
 
     cols = list(df.columns)
@@ -609,6 +613,9 @@ def render_pinned_table(df, pin_cols, row_color_col=None):
     ordered = pin_cols + [c for c in cols if c not in pin_cols]
     df = df[ordered]
     numeric_cols = set(df.select_dtypes(include="number").columns)
+
+    if pin_widths is None:
+        pin_widths = [130] * n_pin
 
     def fmt(v, col):
         if pd.isna(v):
@@ -620,13 +627,18 @@ def render_pinned_table(df, pin_cols, row_color_col=None):
                 return str(v)
         return str(v)
 
-    PIN_WIDTH = 130
+    def pin_style(i):
+        """Force the exact width so it matches the left-offset math below --
+        a mismatch here is what let scrolled content bleed through."""
+        w = pin_widths[i]
+        return f"width:{w}px; min-width:{w}px; max-width:{w}px; overflow:hidden; text-overflow:ellipsis;"
+
     parts = [
         '<div style="overflow-x:auto; max-width:100%; border:1px solid #333; border-radius:4px;">',
         # border-collapse:collapse breaks position:sticky (collapsed borders
         # let scrolled content show through pinned cells) -- separate +
         # zero spacing avoids that while still looking like one solid grid.
-        '<table style="border-collapse:separate; border-spacing:0; font-size:13px; color:#eee; width:max-content;">',
+        '<table style="border-collapse:separate; border-spacing:0; font-size:13px; color:#eee; table-layout:fixed;">',
         "<thead><tr>"
     ]
     left = 0
@@ -634,8 +646,8 @@ def render_pinned_table(df, pin_cols, row_color_col=None):
         style = ("padding:6px 10px; border:1px solid #333; background-color:#161b22; "
                  "white-space:nowrap; text-align:left;")
         if i < n_pin:
-            style += f"position:sticky; left:{left}px; z-index:3;"
-            left += PIN_WIDTH
+            style += f"position:sticky; left:{left}px; z-index:3; {pin_style(i)}"
+            left += pin_widths[i]
         parts.append(f'<th style="{style}">{_html.escape(str(c))}</th>')
     parts.append("</tr></thead><tbody>")
 
@@ -650,8 +662,8 @@ def render_pinned_table(df, pin_cols, row_color_col=None):
             bg = "#1a1f27" if i < n_pin else "#0e1117"
             style = f"padding:6px 10px; border:1px solid #333; white-space:nowrap; background-color:{bg}; {color_style}"
             if i < n_pin:
-                style += f"position:sticky; left:{left}px; z-index:2;"
-                left += PIN_WIDTH
+                style += f"position:sticky; left:{left}px; z-index:2; {pin_style(i)}"
+                left += pin_widths[i]
             parts.append(f'<td style="{style}">{_html.escape(fmt(row[c], c))}</td>')
         parts.append("</tr>")
     parts.append("</tbody></table></div>")
@@ -850,7 +862,7 @@ def display_frozen(df, name_col="Symbol"):
     (used for the Excel download) is left untouched."""
     df2 = df.copy()
     df2[name_col] = df2[name_col].apply(shorten_name)
-    render_pinned_table(df2, ["Sr. No.", name_col], row_color_col="Signal")
+    render_pinned_table(df2, ["Sr. No.", name_col], row_color_col="Signal", pin_widths=[70, 170])
 
 
 if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
