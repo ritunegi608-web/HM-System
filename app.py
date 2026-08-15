@@ -345,27 +345,43 @@ def build_chart(data, num_bars=45, interval="1d"):
     )
 
     # ---- Lower section: RSI zones (orange above 50, light green below 50) ----
-    fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
-                              hoverinfo="skip"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=idx, y=rsi_upper, line=dict(width=0), fill="tonexty",
-                              fillcolor="rgba(144,238,144,0.35)", name="Overbought (>50)",
-                              showlegend=True, hoverinfo="skip"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=idx, y=midline, line=dict(width=0), showlegend=False,
-                              hoverinfo="skip"), row=2, col=1)
-    fig.add_trace(go.Scatter(x=idx, y=rsi_lower, line=dict(width=0), fill="tonexty",
-                              fillcolor="rgba(255,200,120,0.35)", name="Oversold (<50)",
-                              showlegend=True, hoverinfo="skip"), row=2, col=1)
+    # Build the fill as SEPARATE traces per trading day -- a single fill
+    # trace that spans a day-to-day rangebreak jump is what was causing
+    # broken/notched edges in the shading (30m/2h/3h/4h have few points per
+    # day so each break was very visible; 1d/1h/15m have enough points that
+    # it was easy to miss).
+    day_keys = pd.Index([d.date() for d in idx])
+    first_day = True
+    for day, day_idx in idx.groupby(day_keys).items():
+        day_idx = pd.DatetimeIndex(day_idx)
+        day_mid = midline.loc[day_idx]
+        day_upper = rsi_upper.loc[day_idx]
+        day_lower = rsi_lower.loc[day_idx]
+        fig.add_trace(go.Scatter(x=day_idx, y=day_mid, line=dict(width=0), showlegend=False,
+                                  hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=day_idx, y=day_upper, line=dict(width=0), fill="tonexty",
+                                  fillcolor="rgba(144,238,144,0.35)", name="Overbought (>50)",
+                                  showlegend=first_day, legendgroup="overbought",
+                                  hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=day_idx, y=day_mid, line=dict(width=0), showlegend=False,
+                                  hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=day_idx, y=day_lower, line=dict(width=0), fill="tonexty",
+                                  fillcolor="rgba(255,200,120,0.35)", name="Oversold (<50)",
+                                  showlegend=first_day, legendgroup="oversold",
+                                  hoverinfo="skip"), row=2, col=1)
+        first_day = False
 
     # Midline at 50
     fig.add_trace(
         go.Scatter(x=idx, y=midline, mode="lines", line=dict(color="gray", width=1, dash="dot"),
-                   name="Midline (50)"), row=2, col=1
+                   name="Midline (50)", connectgaps=True), row=2, col=1
     )
 
     # RSI line itself
     fig.add_trace(
         go.Scatter(x=idx, y=rsi, mode="lines", line=dict(color="white", width=1.1),
-                   name="RSI (9)", text=labels, hovertemplate="%{text}<br>RSI: %{y:.2f}<extra></extra>"),
+                   name="RSI (9)", text=labels, connectgaps=True,
+                   hovertemplate="%{text}<br>RSI: %{y:.2f}<extra></extra>"),
         row=2, col=1
     )
 
@@ -373,13 +389,13 @@ def build_chart(data, num_bars=45, interval="1d"):
     # "Hilega Milega" TradingView indicator (close, 9, 3, 21)
     fig.add_trace(
         go.Scatter(x=idx, y=rsi_wma, mode="lines", line=dict(color="red", width=1),
-                   name="21 WMA (of RSI)", text=labels,
+                   name="21 WMA (of RSI)", text=labels, connectgaps=True,
                    hovertemplate="%{text}<br>WMA: %{y:.2f}<extra></extra>"),
         row=2, col=1
     )
     fig.add_trace(
         go.Scatter(x=idx, y=rsi_ema, mode="lines", line=dict(color="violet", width=1),
-                   name="3 EMA (of RSI)", text=labels,
+                   name="3 EMA (of RSI)", text=labels, connectgaps=True,
                    hovertemplate="%{text}<br>EMA: %{y:.2f}<extra></extra>"),
         row=2, col=1
     )
