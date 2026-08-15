@@ -226,16 +226,20 @@ def fetch_data(symbol, interval):
         data.columns = data.columns.get_level_values(0)
 
     if cfg["resample"]:
-        # Anchor bins to NSE's 9:15 AM market open (default resample bins
-        # start at midnight, which chops candles into uneven/partial pieces
-        # and made 2h/3h/4h charts look distorted).
+        # Anchor bins to NSE's 9:15 AM market open (9:15-11:15, 11:15-1:15,
+        # 1:15-3:15, and a final shorter bin 3:15-3:30 that includes the
+        # closing auction session -- this last one is a genuine, real
+        # candle and must be kept, not dropped).
         data = data.resample(cfg["resample"], offset="9h15min").agg({
             "Open": "first",
             "High": "max",
             "Low": "min",
             "Close": "last",
             "Volume": "sum"
-        }).dropna(how="all")
+        })
+        # Only drop bins with zero trades at all (fully empty) -- keep every
+        # real candle including short/partial ones.
+        data = data.dropna(how="all")
 
     return data
 
@@ -285,6 +289,25 @@ def build_chart(data, num_bars=45, interval="1d"):
     rsi_wma = data["RSI_WMA_21"]
     rsi_ema = data["RSI_EMA_3"]
 
+    # NSE's closing call-auction session (3:15-3:25 PM) doesn't form normal
+    # continuous-trading candles -- for the two finest timeframes (1m, 5m)
+    # show it as a thin flat green mark instead of a regular candle body.
+    # RSI/EMA/WMA still use the real Close values (computed earlier from
+    # `data`), so indicators are unaffected -- this only changes how the
+    # candlestick trace is drawn.
+    open_plot = data["Open"].copy()
+    high_plot = data["High"].copy()
+    low_plot = data["Low"].copy()
+    close_plot = data["Close"].copy()
+    if interval in ["1m", "5m"]:
+        auction_mask = [(d.hour == 15 and 15 <= d.minute < 25) for d in idx]
+        for i, is_auction in enumerate(auction_mask):
+            if is_auction:
+                c = close_plot.iloc[i]
+                open_plot.iloc[i] = c
+                high_plot.iloc[i] = c
+                low_plot.iloc[i] = c
+
     # Masked series so the fill collapses to nothing on the "wrong" side of 50
     rsi_upper = rsi.clip(lower=50)
     rsi_lower = rsi.clip(upper=50)
@@ -300,7 +323,7 @@ def build_chart(data, num_bars=45, interval="1d"):
     # ---- Upper section: Price as a candlestick chart ----
     fig.add_trace(
         go.Candlestick(
-            x=x, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"],
+            x=x, open=open_plot, high=high_plot, low=low_plot, close=close_plot,
             name="Price", text=labels,
             hovertemplate="%{text}<br>O: %{open:.2f}  H: %{high:.2f}<br>L: %{low:.2f}  C: %{close:.2f}<extra></extra>",
             increasing_line_color="#26A69A", decreasing_line_color="#EF5350"
@@ -436,12 +459,12 @@ def fetch_and_display():
             _raw = _raw.reset_index().rename(columns={_raw.index.name or "index": "Date"})
             # Show time too for intraday intervals; date-only for daily/weekly/monthly
             _is_intraday_raw = interval in ["1m", "5m", "10m", "15m", "30m", "1h", "2h", "3h", "4h"]
-            _date_fmt = "%Y-%m-%d %H:%M" if _is_intraday_raw else "%Y-%m-%d"
+            _date_fmt = "%d-%b %H:%M" if _is_intraday_raw else "%d-%b-%Y"
             _raw["Date"] = pd.to_datetime(_raw["Date"]).dt.strftime(_date_fmt)
             _raw.insert(0, "Symbol", symbol)
             _raw["Category"] = "Index" if symbol.startswith("^") else get_category(symbol, _fo_symbols)
 
-            render_pinned_table(_raw, ["Symbol", "Date"], pin_widths=[100, 160])
+            render_pinned_table(_raw, ["Symbol", "Date"], pin_widths=[75, 118])
 
         st.caption(f"Last updated: {pd.Timestamp.now()}")
 
@@ -724,7 +747,8 @@ def scan_symbols(symbols, yf_suffix=".NS", interval="1d"):
                 df = df.resample(cfg["resample"], offset="9h15min").agg({
                     "Open": "first", "High": "max", "Low": "min",
                     "Close": "last", "Volume": "sum"
-                }).dropna(how="all")
+                })
+                df = df.dropna(how="all")
 
             close = df["Close"].dropna()
             if len(close) < 10:
