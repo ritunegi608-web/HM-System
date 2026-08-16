@@ -523,7 +523,8 @@ def fetch_and_display():
             _date_fmt = "%d-%b %H:%M" if _is_intraday_raw else "%d-%b-%Y"
             _raw["Date"] = pd.to_datetime(_raw["Date"]).dt.strftime(_date_fmt)
             _raw.insert(0, "Symbol", symbol)
-            _raw["Category"] = "Index" if symbol.startswith("^") else get_category(symbol, _fo_symbols)
+            _is_index_symbol = symbol.startswith("^") or symbol in MAJOR_INDEXES.values()
+            _raw["Category"] = "Index" if _is_index_symbol else get_category(symbol, _fo_symbols)
 
             render_pinned_table(_raw, ["Symbol", "Date"], pin_widths=[75, 118])
 
