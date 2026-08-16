@@ -352,35 +352,50 @@ def build_chart(data, num_bars=45, interval="1d"):
     )
 
     # ---- Lower section: RSI zones (orange above 50, light green below 50) ----
-    # Build the fill as SEPARATE traces per trading day -- a single fill
-    # trace that spans a day-to-day rangebreak jump is what was causing
-    # broken/notched edges in the shading (30m/2h/3h/4h have few points per
-    # day so each break was very visible; 1d/1h/15m have enough points that
-    # it was easy to miss).
-    day_keys = pd.Index([d.date() for d in idx])
-    first_day = True
-    for day, day_idx in idx.groupby(day_keys).items():
-        day_idx = pd.DatetimeIndex(day_idx)
-        day_mid = midline.loc[day_idx]
-        day_upper = rsi_upper.loc[day_idx]
-        day_lower = rsi_lower.loc[day_idx]
-        # mode="lines" is required here: Plotly defaults to "lines+markers"
-        # on traces with few points, which is what caused the round bubble
-        # markers to appear once the fill was split per-day (each day now
-        # has only a handful of points).
-        fig.add_trace(go.Scatter(x=day_idx, y=day_mid, mode="lines", line=dict(width=0),
+    # For intraday timeframes, build the fill as SEPARATE traces per trading
+    # day -- a single fill trace spanning a day-to-day rangebreak jump is
+    # what caused broken/notched shading edges. Daily/weekly/monthly candles
+    # each sit on their own distinct calendar date, so day-grouping would
+    # make every group a single point (nothing to fill between) -- those
+    # keep one continuous trace instead.
+    OVERBOUGHT_COLOR = "rgba(144,238,144,0.22)"  # very light green
+    OVERSOLD_COLOR = "rgba(255,190,110,0.22)"    # very light orange
+
+    if is_intraday:
+        day_keys = pd.Index([d.date() for d in idx])
+        first_day = True
+        for day, day_idx in idx.groupby(day_keys).items():
+            day_idx = pd.DatetimeIndex(day_idx)
+            day_mid = midline.loc[day_idx]
+            day_upper = rsi_upper.loc[day_idx]
+            day_lower = rsi_lower.loc[day_idx]
+            # mode="lines" is required here: Plotly defaults to "lines+markers"
+            # on traces with few points, which is what caused round bubble
+            # markers to appear once the fill was split per-day.
+            fig.add_trace(go.Scatter(x=day_idx, y=day_mid, mode="lines", line=dict(width=0),
+                                      showlegend=False, hoverinfo="skip"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=day_idx, y=day_upper, mode="lines", line=dict(width=0), fill="tonexty",
+                                      fillcolor=OVERBOUGHT_COLOR, name="Overbought (>50)",
+                                      showlegend=first_day, legendgroup="overbought",
+                                      hoverinfo="skip"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=day_idx, y=day_mid, mode="lines", line=dict(width=0),
+                                      showlegend=False, hoverinfo="skip"), row=2, col=1)
+            fig.add_trace(go.Scatter(x=day_idx, y=day_lower, mode="lines", line=dict(width=0), fill="tonexty",
+                                      fillcolor=OVERSOLD_COLOR, name="Oversold (<50)",
+                                      showlegend=first_day, legendgroup="oversold",
+                                      hoverinfo="skip"), row=2, col=1)
+            first_day = False
+    else:
+        fig.add_trace(go.Scatter(x=idx, y=midline, mode="lines", line=dict(width=0),
                                   showlegend=False, hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=day_idx, y=day_upper, mode="lines", line=dict(width=0), fill="tonexty",
-                                  fillcolor="rgba(144,238,144,0.35)", name="Overbought (>50)",
-                                  showlegend=first_day, legendgroup="overbought",
-                                  hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=day_idx, y=day_mid, mode="lines", line=dict(width=0),
+        fig.add_trace(go.Scatter(x=idx, y=rsi_upper, mode="lines", line=dict(width=0), fill="tonexty",
+                                  fillcolor=OVERBOUGHT_COLOR, name="Overbought (>50)",
+                                  showlegend=True, hoverinfo="skip"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=idx, y=midline, mode="lines", line=dict(width=0),
                                   showlegend=False, hoverinfo="skip"), row=2, col=1)
-        fig.add_trace(go.Scatter(x=day_idx, y=day_lower, mode="lines", line=dict(width=0), fill="tonexty",
-                                  fillcolor="rgba(255,200,120,0.35)", name="Oversold (<50)",
-                                  showlegend=first_day, legendgroup="oversold",
-                                  hoverinfo="skip"), row=2, col=1)
-        first_day = False
+        fig.add_trace(go.Scatter(x=idx, y=rsi_lower, mode="lines", line=dict(width=0), fill="tonexty",
+                                  fillcolor=OVERSOLD_COLOR, name="Oversold (<50)",
+                                  showlegend=True, hoverinfo="skip"), row=2, col=1)
 
     # Midline at 50
     fig.add_trace(
