@@ -270,9 +270,16 @@ def fetch_data(symbol, interval):
             "Close": "last",
             "Volume": "sum"
         })
-        # Only drop bins with zero trades at all (fully empty) -- keep every
-        # real candle including short/partial ones.
-        data = data.dropna(how="all")
+
+    # Drop bins with no actual trade (Open/High/Low/Close all missing).
+    # NOTE: dropna(how="all") does NOT catch these -- resample's Volume:"sum"
+    # returns 0 (not NaN) for an empty bin, so the row never looked "fully"
+    # empty and these ghost rows (spanning every non-trading hour of the
+    # day, even overnight) were slipping through into the chart, the RSI
+    # section, and the raw data table. Checking the price columns directly
+    # fixes all three at once. A genuine short/partial candle (e.g. the
+    # 3:15-3:30 PM closing one) still has real OHLC values, so it's kept.
+    data = data.dropna(subset=["Open", "High", "Low", "Close"])
 
     return data
 
@@ -682,6 +689,11 @@ def render_pinned_table(df, pin_cols, row_color_col=None, pin_widths=None):
     def fmt(v, col):
         if pd.isna(v):
             return ""
+        if col == "Sr. No.":
+            try:
+                return str(int(v))
+            except Exception:
+                return str(v)
         if col in numeric_cols:
             try:
                 return f"{float(v):.2f}"
@@ -787,7 +799,9 @@ def scan_symbols(symbols, yf_suffix=".NS", interval="1d"):
                     "Open": "first", "High": "max", "Low": "min",
                     "Close": "last", "Volume": "sum"
                 })
-                df = df.dropna(how="all")
+                # See fetch_data(): how="all" misses empty bins because
+                # Volume:"sum" gives 0 (not NaN) for them -- check OHLC directly.
+                df = df.dropna(subset=["Open", "High", "Low", "Close"])
 
             close = df["Close"].dropna()
             if len(close) < 10:
@@ -925,7 +939,7 @@ def display_frozen(df, name_col="Symbol"):
     (used for the Excel download) is left untouched."""
     df2 = df.copy()
     df2[name_col] = df2[name_col].apply(shorten_name)
-    render_pinned_table(df2, ["Sr. No.", name_col], row_color_col="Signal", pin_widths=[70, 170])
+    render_pinned_table(df2, ["Sr. No.", name_col], row_color_col="Signal", pin_widths=[45, 170])
 
 
 if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
