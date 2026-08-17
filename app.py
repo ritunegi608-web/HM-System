@@ -969,7 +969,7 @@ if run_summary_clicked:
 
     # ---- Indexes: one column of Signal per timeframe ----
     idx_summary = None
-    for label, tf in SUMMARY_TIMEFRAMES:
+    for i, (label, tf) in enumerate(SUMMARY_TIMEFRAMES):
         with st.spinner(f"Scanning indexes — {label} timeframe..."):
             tf_df = scan_symbols(index_symbols_sum, yf_suffix="", interval=tf)
         if tf_df.empty:
@@ -979,6 +979,8 @@ if run_summary_clicked:
             idx_summary = tf_df[["Symbol", "Latest Price"]].merge(piece, on="Symbol")
         else:
             idx_summary = idx_summary.merge(piece, on="Symbol", how="outer")
+        if i < len(SUMMARY_TIMEFRAMES) - 1:
+            time.sleep(3)  # brief pause between bursts so Yahoo doesn't rate-limit the next one
     if idx_summary is not None:
         name_map_sum = dict(zip(index_symbols_sum, index_names_sum))
         idx_summary["Yahoo Name"] = idx_summary["Symbol"]
@@ -989,16 +991,39 @@ if run_summary_clicked:
 
     # ---- Nifty 500 stocks: one column of Signal per timeframe ----
     stocks_summary = None
-    for label, tf in SUMMARY_TIMEFRAMES:
-        with st.spinner(f"Scanning Nifty 500 stocks — {label} timeframe (this can take a while)..."):
+    _missed_symbols_by_tf = {}
+    _progress_area = st.empty()
+    for i, (label, tf) in enumerate(SUMMARY_TIMEFRAMES):
+        _progress_area.info(f"Timeframe {i + 1} of {len(SUMMARY_TIMEFRAMES)}: {label} — scanning Nifty 500 stocks...")
+        with st.spinner(f"Scanning Nifty 500 stocks — {label} timeframe (this can take a few minutes)..."):
             tf_df = scan_symbols(nifty500_sum, yf_suffix=".NS", interval=tf)
-        if tf_df.empty:
-            continue
-        piece = tf_df[["Symbol", "Signal"]].rename(columns={"Signal": label})
-        if stocks_summary is None:
-            stocks_summary = tf_df[["Symbol", "Latest Price"]].merge(piece, on="Symbol")
-        else:
-            stocks_summary = stocks_summary.merge(piece, on="Symbol", how="outer")
+        missing_count = len(nifty500_sum) - len(tf_df)
+        if missing_count > 0:
+            _missed_symbols_by_tf[label] = missing_count
+        if not tf_df.empty:
+            piece = tf_df[["Symbol", "Signal"]].rename(columns={"Signal": label})
+            if stocks_summary is None:
+                stocks_summary = tf_df[["Symbol", "Latest Price"]].merge(piece, on="Symbol")
+            else:
+                stocks_summary = stocks_summary.merge(piece, on="Symbol", how="outer")
+            # Save progress after EVERY timeframe, not just at the end -- so
+            # nothing is lost even if a later timeframe gets rate-limited.
+            st.session_state.summary_stocks_df = stocks_summary
+        if i < len(SUMMARY_TIMEFRAMES) - 1:
+            _progress_area.info(
+                f"Timeframe {i + 1} of {len(SUMMARY_TIMEFRAMES)} done ({label}). "
+                f"Pausing ~35s before the next one so Yahoo Finance doesn't rate-limit it "
+                f"(mirrors the gap that happens naturally between manual scans)..."
+            )
+            time.sleep(35)
+    _progress_area.empty()
+    if _missed_symbols_by_tf:
+        st.warning(
+            "Yahoo Finance rate-limited part of the stock scan for: " +
+            ", ".join(f"{k} ({v} stocks missing)" for k, v in _missed_symbols_by_tf.items()) +
+            ". Click Summary again -- it re-scans every timeframe and should fill in more each time."
+        )
+    stocks_summary = st.session_state.summary_stocks_df
     if stocks_summary is not None:
         stocks_summary = sort_stocks_by_category(stocks_summary, category_map_sum, category_symbol_order_sum)
         stocks_summary["Category"] = stocks_summary["Symbol"].map(
@@ -1007,6 +1032,9 @@ if run_summary_clicked:
         stocks_summary["Yahoo Name"] = stocks_summary["Symbol"] + ".NS"
         stocks_summary["Symbol"] = stocks_summary["Symbol"].map(nifty500_names_sum).fillna(stocks_summary["Symbol"])
         _tf_cols = [label for label, _ in SUMMARY_TIMEFRAMES]
+        for _c in _tf_cols:  # a fully-failed timeframe never got merged in -- add it as blank
+            if _c not in stocks_summary.columns:
+                stocks_summary[_c] = None
         stocks_summary = stocks_summary[["Symbol", "Latest Price"] + _tf_cols + ["Yahoo Name", "Category"]]
         stocks_summary.insert(0, "Sr. No.", range(1, len(stocks_summary) + 1))
     st.session_state.summary_stocks_df = stocks_summary
