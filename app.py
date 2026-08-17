@@ -1121,6 +1121,39 @@ if st.session_state.summary_index_df is not None and not st.session_state.summar
         if _sum_stocks_display is not None:
             st.write("**Nifty 500 Stocks**")
             render_pinned_table(_sum_stocks_display, ["Sr. No.", "Symbol"], pin_widths=[48, 170])
+
+    # ---- Download the summary as a single Excel file with 2 sheets ----
+    from openpyxl.styles import Font as _SummaryFont
+
+    _summary_tf_cols = [label for label, _ in SUMMARY_TIMEFRAMES]
+
+    def _color_code_summary_sheet(worksheet, df):
+        """Each of the 8 timeframe columns gets its OWN cell colored by its
+        own signal value (unlike the main scanner sheet, which colors a
+        whole row from one Signal column)."""
+        col_positions = {name: i + 1 for i, name in enumerate(df.columns)}
+        tf_col_idxs = [col_positions[c] for c in _summary_tf_cols if c in col_positions]
+        for row_idx in range(2, len(df) + 2):  # row 1 = header
+            for col_idx in tf_col_idxs:
+                cell = worksheet.cell(row=row_idx, column=col_idx)
+                color = SIGNAL_COLORS_EXCEL.get(cell.value, "#000000").lstrip("#")
+                cell.font = _SummaryFont(color=color)
+
+    _summary_excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(_summary_excel_buffer, engine="openpyxl") as writer:
+        st.session_state.summary_index_df.to_excel(writer, sheet_name="Indexes", index=False)
+        _color_code_summary_sheet(writer.sheets["Indexes"], st.session_state.summary_index_df)
+        if st.session_state.summary_stocks_df is not None and not st.session_state.summary_stocks_df.empty:
+            st.session_state.summary_stocks_df.to_excel(writer, sheet_name="Nifty500_Stocks", index=False)
+            _color_code_summary_sheet(writer.sheets["Nifty500_Stocks"], st.session_state.summary_stocks_df)
+    _summary_excel_buffer.seek(0)
+
+    st.download_button(
+        label="⬇️ Download Summary Excel (Indexes + Nifty 500 — 2 sheets)",
+        data=_summary_excel_buffer,
+        file_name=f"signal_summary_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 elif run_summary_clicked:
     st.warning("Summary scan didn't return any data -- try again.")
 
