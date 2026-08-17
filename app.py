@@ -358,8 +358,8 @@ def build_chart(data, num_bars=45, interval="1d"):
     # each sit on their own distinct calendar date, so day-grouping would
     # make every group a single point (nothing to fill between) -- those
     # keep one continuous trace instead.
-    OVERBOUGHT_COLOR = "rgba(144,238,144,0.22)"  # very light green
-    OVERSOLD_COLOR = "rgba(255,190,110,0.22)"    # very light orange
+    OVERBOUGHT_COLOR = "rgba(144,238,144,0.28)"  # light green
+    OVERSOLD_COLOR = "rgba(255,140,20,0.40)"     # light orange (brighter + more opaque so it doesn't read as grey on the dark background)
 
     if is_intraday:
         day_keys = pd.Index([d.date() for d in idx])
@@ -648,6 +648,7 @@ SIGNAL_COLORS_EXCEL = {
     "BUY": "#008000",                        # green
     "SELL": "#FF0000",                       # red
     "CORRECTION/SHORT COVERING": "#0000FF",  # blue
+    "CORRECTION POSSIBLE": "#8A2BE2",        # violet
     "WAIT": "#000000",                       # black (in the downloaded Excel)
 }
 
@@ -655,6 +656,7 @@ SIGNAL_COLORS_DISPLAY = {
     "BUY": "#00FF00",                        # bright green (visible on dark bg)
     "SELL": "#FF4B4B",                        # red
     "CORRECTION/SHORT COVERING": "#4DA6FF",   # blue
+    "CORRECTION POSSIBLE": "#B266FF",         # violet
     "WAIT": "#FFFFFF",                        # white (so it's visible on the dashboard)
 }
 
@@ -666,6 +668,9 @@ def get_scanner_signal(rsi, price, wma):
     BUY: RSI > 50 and RSI > PRICE > WMA
     SELL: RSI < 50 and WMA > PRICE > RSI
     CORRECTION/SHORT COVERING: RSI < 50 and RSI > PRICE > WMA
+    CORRECTION POSSIBLE: RSI > 50, PRICE > 50, WMA > 50 and RSI < PRICE < WMA
+        (only reachable when none of the RSI>50 BUY ordering applies, so it
+        never overrides/contradicts the first three rules)
     """
     if pd.isna(rsi) or pd.isna(price) or pd.isna(wma):
         return "WAIT"
@@ -675,6 +680,8 @@ def get_scanner_signal(rsi, price, wma):
         return "SELL"
     elif rsi < 50 and rsi > price > wma:
         return "CORRECTION/SHORT COVERING"
+    elif rsi > 50 and price > 50 and wma > 50 and rsi < price < wma:
+        return "CORRECTION POSSIBLE"
     else:
         return "WAIT"
 
@@ -733,8 +740,11 @@ def render_pinned_table(df, pin_cols, row_color_col=None, pin_widths=None):
     ]
     left = 0
     for i, c in enumerate(ordered):
-        style = ("padding:6px 10px; border:1px solid #333; background-color:#161b22; "
-                 "white-space:nowrap; text-align:left;")
+        # Smaller font on pinned headers so a long label (e.g. "Sr. No.")
+        # shrinks to fit its narrow column instead of getting cut off.
+        header_font = "font-size:10px;" if i < n_pin else ""
+        style = ("padding:6px 6px; border:1px solid #333; background-color:#161b22; "
+                 f"white-space:nowrap; text-align:left; {header_font}")
         if i < n_pin:
             style += f"position:sticky; left:{left}px; z-index:3; {pin_style(i)}"
             left += pin_widths[i]
@@ -877,8 +887,16 @@ if "scanner_stocks_df" not in st.session_state:
     st.session_state.scanner_stocks_df = None
 if "scanner_interval_used" not in st.session_state:
     st.session_state.scanner_interval_used = None
+if "summary_index_df" not in st.session_state:
+    st.session_state.summary_index_df = None
+if "summary_stocks_df" not in st.session_state:
+    st.session_state.summary_stocks_df = None
 
-if st.button("▶️ Run / Refresh Scanner"):
+_col_scan_btn, _col_summary_btn = st.columns(2)
+run_scanner_clicked = _col_scan_btn.button("▶️ Run / Refresh Scanner")
+run_summary_clicked = _col_summary_btn.button("📅 Summary (all timeframes)")
+
+if run_scanner_clicked:
     with st.spinner("Fetching F&O eligible stock list from NSE..."):
         fo_symbols = get_fo_symbols()
 
@@ -934,6 +952,66 @@ if st.button("▶️ Run / Refresh Scanner"):
     st.session_state.scanner_interval_used = scanner_interval
 
 
+SUMMARY_TIMEFRAMES = [
+    ("30 Min", "30m"), ("1 Hour", "1h"), ("2 Hour", "2h"), ("3 Hour", "3h"),
+    ("4 Hour", "4h"), ("1 D", "1d"), ("1 W", "1wk"), ("1 M", "1mo"),
+]
+
+if run_summary_clicked:
+    with st.spinner("Fetching F&O eligible stock list from NSE..."):
+        fo_symbols_sum = get_fo_symbols()
+    with st.spinner("Fetching Nifty 50 / Next 50 / Midcap 150 / Smallcap 250 category lists..."):
+        category_map_sum, category_symbol_order_sum, _sum_cat_errors = get_stock_categories()
+
+    index_names_sum = list(MAJOR_INDEXES.keys())
+    index_symbols_sum = list(MAJOR_INDEXES.values())
+    nifty500_sum, nifty500_names_sum = get_nifty500_details()
+
+    # ---- Indexes: one column of Signal per timeframe ----
+    idx_summary = None
+    for label, tf in SUMMARY_TIMEFRAMES:
+        with st.spinner(f"Scanning indexes — {label} timeframe..."):
+            tf_df = scan_symbols(index_symbols_sum, yf_suffix="", interval=tf)
+        if tf_df.empty:
+            continue
+        piece = tf_df[["Symbol", "Signal"]].rename(columns={"Signal": label})
+        if idx_summary is None:
+            idx_summary = tf_df[["Symbol", "Latest Price"]].merge(piece, on="Symbol")
+        else:
+            idx_summary = idx_summary.merge(piece, on="Symbol", how="outer")
+    if idx_summary is not None:
+        name_map_sum = dict(zip(index_symbols_sum, index_names_sum))
+        idx_summary["Yahoo Name"] = idx_summary["Symbol"]
+        idx_summary["Symbol"] = idx_summary["Symbol"].map(name_map_sum)
+        idx_summary["Category"] = "Index"
+        idx_summary.insert(0, "Sr. No.", range(1, len(idx_summary) + 1))
+    st.session_state.summary_index_df = idx_summary
+
+    # ---- Nifty 500 stocks: one column of Signal per timeframe ----
+    stocks_summary = None
+    for label, tf in SUMMARY_TIMEFRAMES:
+        with st.spinner(f"Scanning Nifty 500 stocks — {label} timeframe (this can take a while)..."):
+            tf_df = scan_symbols(nifty500_sum, yf_suffix=".NS", interval=tf)
+        if tf_df.empty:
+            continue
+        piece = tf_df[["Symbol", "Signal"]].rename(columns={"Signal": label})
+        if stocks_summary is None:
+            stocks_summary = tf_df[["Symbol", "Latest Price"]].merge(piece, on="Symbol")
+        else:
+            stocks_summary = stocks_summary.merge(piece, on="Symbol", how="outer")
+    if stocks_summary is not None:
+        stocks_summary = sort_stocks_by_category(stocks_summary, category_map_sum, category_symbol_order_sum)
+        stocks_summary["Category"] = stocks_summary["Symbol"].map(
+            lambda s: get_category(s, fo_symbols_sum)
+        )
+        stocks_summary["Yahoo Name"] = stocks_summary["Symbol"] + ".NS"
+        stocks_summary["Symbol"] = stocks_summary["Symbol"].map(nifty500_names_sum).fillna(stocks_summary["Symbol"])
+        _tf_cols = [label for label, _ in SUMMARY_TIMEFRAMES]
+        stocks_summary = stocks_summary[["Symbol", "Latest Price"] + _tf_cols + ["Yahoo Name", "Category"]]
+        stocks_summary.insert(0, "Sr. No.", range(1, len(stocks_summary) + 1))
+    st.session_state.summary_stocks_df = stocks_summary
+
+
 def shorten_name(name, max_words=4):
     """Trim a long company/index name to at most `max_words` words for
     on-screen display (the full name still goes into the Excel export
@@ -955,7 +1033,7 @@ def display_frozen(df, name_col="Symbol"):
     (used for the Excel download) is left untouched."""
     df2 = df.copy()
     df2[name_col] = df2[name_col].apply(shorten_name)
-    render_pinned_table(df2, ["Sr. No.", name_col], row_color_col="Signal", pin_widths=[45, 170])
+    render_pinned_table(df2, ["Sr. No.", name_col], row_color_col="Signal", pin_widths=[48, 170])
 
 
 if st.session_state.scanner_index_df is not None and not st.session_state.scanner_index_df.empty:
@@ -1016,6 +1094,35 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
     )
 else:
     st.info("Click 'Run / Refresh Scanner' to load index and Nifty 500 data.")
+
+if st.session_state.summary_index_df is not None and not st.session_state.summary_index_df.empty:
+    st.subheader("📅 Signal Summary — all timeframes")
+    st.caption("Sr. No., Symbol, Latest Price (from the 1D data), then the Signal at each timeframe, then Yahoo Name and Category.")
+
+    sum_tab_all, sum_tab_idx, sum_tab_stocks = st.tabs(["All", "Indexes", "Nifty 500 Stocks"])
+
+    _sum_idx_display = st.session_state.summary_index_df.copy()
+    _sum_idx_display["Symbol"] = _sum_idx_display["Symbol"].apply(shorten_name)
+    _sum_stocks_display = None
+    if st.session_state.summary_stocks_df is not None and not st.session_state.summary_stocks_df.empty:
+        _sum_stocks_display = st.session_state.summary_stocks_df.copy()
+        _sum_stocks_display["Symbol"] = _sum_stocks_display["Symbol"].apply(shorten_name)
+
+    with sum_tab_idx:
+        render_pinned_table(_sum_idx_display, ["Sr. No.", "Symbol"], pin_widths=[48, 170])
+
+    with sum_tab_stocks:
+        if _sum_stocks_display is not None:
+            render_pinned_table(_sum_stocks_display, ["Sr. No.", "Symbol"], pin_widths=[48, 170])
+
+    with sum_tab_all:
+        st.write("**Indexes**")
+        render_pinned_table(_sum_idx_display, ["Sr. No.", "Symbol"], pin_widths=[48, 170])
+        if _sum_stocks_display is not None:
+            st.write("**Nifty 500 Stocks**")
+            render_pinned_table(_sum_stocks_display, ["Sr. No.", "Symbol"], pin_widths=[48, 170])
+elif run_summary_clicked:
+    st.warning("Summary scan didn't return any data -- try again.")
 
 
 # ---------- Live loop ----------
