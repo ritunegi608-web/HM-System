@@ -511,7 +511,7 @@ def fetch_and_display():
         )
 
         with st.expander("Raw Data (latest rows)"):
-            _fo_symbols = get_fo_symbols()
+            _fo_symbols, _fo_err = get_fo_symbols()
             _raw = (
                 data[["Close", "RSI_9", "RSI_EMA_3", "RSI_WMA_21"]]
                 .rename(columns={"Close": "Last Traded Price"})
@@ -541,13 +541,16 @@ def fetch_and_display():
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_fo_symbols():
     """Fetch the live list of F&O (Futures & Options) eligible symbols
-    from NSE. Returns a set of bare symbols (no .NS). Empty set on failure
-    (in which case every stock will show as 'Cash' until it succeeds)."""
+    from NSE. Returns (set_of_bare_symbols, error_message_or_None).
+    Falls back to a small known F&O list (major Nifty 50 names, which are
+    virtually all F&O-eligible) if the live fetch fails, so stocks don't
+    all incorrectly default to 'Cash'."""
     url = "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.nseindia.com/",
     }
     try:
         session = requests.Session()
@@ -558,9 +561,12 @@ def get_fo_symbols():
         df = pd.read_csv(io.StringIO(resp.text))
         df.columns = [c.strip() for c in df.columns]
         syms = df["SYMBOL"].astype(str).str.strip().tolist()
-        return set(syms)
-    except Exception:
-        return set()
+        syms = [s for s in syms if s and s.upper() != "SYMBOL"]
+        if not syms:
+            return set(FALLBACK_SYMBOLS), "NSE returned an empty F&O list"
+        return set(syms), None
+    except Exception as e:
+        return set(FALLBACK_SYMBOLS), str(e)
 
 
 def get_category(symbol, fo_symbols):
@@ -898,7 +904,10 @@ run_summary_clicked = _col_summary_btn.button("📅 Summary (all timeframes)")
 
 if run_scanner_clicked:
     with st.spinner("Fetching F&O eligible stock list from NSE..."):
-        fo_symbols = get_fo_symbols()
+        fo_symbols, fo_err = get_fo_symbols()
+        if fo_err:
+            st.warning(f"⚠️ Could not fetch the live F&O list from NSE ({fo_err}). "
+                       f"Using a small backup list of major F&O stocks until it succeeds.")
 
     with st.spinner("Scanning major indexes..."):
         index_names = list(MAJOR_INDEXES.keys())
@@ -959,7 +968,10 @@ SUMMARY_TIMEFRAMES = [
 
 if run_summary_clicked:
     with st.spinner("Fetching F&O eligible stock list from NSE..."):
-        fo_symbols_sum = get_fo_symbols()
+        fo_symbols_sum, fo_err_sum = get_fo_symbols()
+        if fo_err_sum:
+            st.warning(f"⚠️ Could not fetch the live F&O list from NSE ({fo_err_sum}). "
+                       f"Using a small backup list of major F&O stocks until it succeeds.")
     with st.spinner("Fetching Nifty 50 / Next 50 / Midcap 150 / Smallcap 250 category lists..."):
         category_map_sum, category_symbol_order_sum, _sum_cat_errors = get_stock_categories()
 
@@ -1089,7 +1101,7 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
             return
         numeric_col_idxs = [
             i + 1 for i, col in enumerate(df.columns)
-            if pd.api.types.is_numeric_dtype(df[col])
+            if pd.api.types.is_numeric_dtype(df[col]) and col != "Sr. No."
         ]
         for row_idx, signal in enumerate(df["Signal"], start=2):  # row 1 = header
             color = SIGNAL_COLORS_EXCEL.get(signal, "#000000").lstrip("#")
@@ -1098,6 +1110,8 @@ if st.session_state.scanner_index_df is not None and not st.session_state.scanne
                 cell.font = Font(color=color)
                 if col_idx in numeric_col_idxs:
                     cell.number_format = "0.00"
+                elif df.columns[col_idx - 1] == "Sr. No.":
+                    cell.number_format = "0"
         # Freeze the first `freeze_cols` columns (Sr. No. + Symbol/Index) and header row
         from openpyxl.utils import get_column_letter
         freeze_cell = f"{get_column_letter(freeze_cols + 1)}2"
@@ -1161,11 +1175,14 @@ if st.session_state.summary_index_df is not None and not st.session_state.summar
         whole row from one Signal column)."""
         col_positions = {name: i + 1 for i, name in enumerate(df.columns)}
         tf_col_idxs = [col_positions[c] for c in _summary_tf_cols if c in col_positions]
+        sr_no_idx = col_positions.get("Sr. No.")
         for row_idx in range(2, len(df) + 2):  # row 1 = header
             for col_idx in tf_col_idxs:
                 cell = worksheet.cell(row=row_idx, column=col_idx)
                 color = SIGNAL_COLORS_EXCEL.get(cell.value, "#000000").lstrip("#")
                 cell.font = _SummaryFont(color=color)
+            if sr_no_idx:
+                worksheet.cell(row=row_idx, column=sr_no_idx).number_format = "0"
 
     _summary_excel_buffer = io.BytesIO()
     with pd.ExcelWriter(_summary_excel_buffer, engine="openpyxl") as writer:
