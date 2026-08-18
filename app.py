@@ -271,15 +271,19 @@ def fetch_data(symbol, interval):
             "Volume": "sum"
         })
 
-    # Drop bins with no actual trade (Open/High/Low/Close all missing).
-    # NOTE: dropna(how="all") does NOT catch these -- resample's Volume:"sum"
-    # returns 0 (not NaN) for an empty bin, so the row never looked "fully"
-    # empty and these ghost rows (spanning every non-trading hour of the
-    # day, even overnight) were slipping through into the chart, the RSI
-    # section, and the raw data table. Checking the price columns directly
-    # fixes all three at once. A genuine short/partial candle (e.g. the
-    # 3:15-3:30 PM closing one) still has real OHLC values, so it's kept.
-    data = data.dropna(subset=["Open", "High", "Low", "Close"])
+    # Drop only if there's truly no trade data at all (Close missing).
+    # NOTE: dropna(how="all") does NOT catch empty resampled bins -- resample's
+    # Volume:"sum" returns 0 (not NaN) for them, so the row never looked
+    # "fully" empty and these ghost rows (every non-trading hour, even
+    # overnight) were slipping through into the chart, RSI section, and raw
+    # data table. Checking Close directly fixes that. We only require Close
+    # (not all 4 fields) so a real trading day isn't dropped entirely just
+    # because Yahoo had a minor gap in one OHLC field for it -- Open/High/Low
+    # fall back to Close instead, which still keeps a genuine partial candle
+    # (e.g. the 3:15-3:30 PM closing one) intact.
+    data = data.dropna(subset=["Close"])
+    for _col in ["Open", "High", "Low"]:
+        data[_col] = data[_col].fillna(data["Close"])
 
     return data
 
@@ -832,8 +836,12 @@ def scan_symbols(symbols, yf_suffix=".NS", interval="1d"):
                     "Close": "last", "Volume": "sum"
                 })
                 # See fetch_data(): how="all" misses empty bins because
-                # Volume:"sum" gives 0 (not NaN) for them -- check OHLC directly.
-                df = df.dropna(subset=["Open", "High", "Low", "Close"])
+                # Volume:"sum" gives 0 (not NaN) for them -- check Close
+                # directly (not all 4 fields, so a real day with a minor
+                # gap in just Open/High/Low isn't dropped entirely).
+                df = df.dropna(subset=["Close"])
+                for _c in ["Open", "High", "Low"]:
+                    df[_c] = df[_c].fillna(df["Close"])
 
             close = df["Close"].dropna()
             if len(close) < 10:
