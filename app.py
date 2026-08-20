@@ -10,6 +10,10 @@ import plotly.graph_objects as go
 
 st.set_page_config(page_title="Live Stock Dashboard", layout="wide")
 
+for _k in ["manual_summary_index_df", "manual_summary_stocks_df", "manual_summary_labels"]:
+    if _k not in st.session_state:
+        st.session_state[_k] = None
+
 st.title("📈 Live Stock Dashboard")
 st.caption("Latest Price | 3-Period EMA | 21-Period WMA | 9-Period RSI")
 
@@ -42,7 +46,70 @@ MAJOR_INDEXES = {
     "NIFTY COMMODITIES": "^CNXCMDT",
 }
 
-# Small backup list used only if the live NSE fetch below fails/is blocked
+# Reverse lookup: our ticker -> the display name NSE's own historical-index
+# API expects (matches for most NSE indices; BSE Sensex etc. simply won't
+# be found there, and the code below falls back to Yahoo automatically).
+INDEX_NSE_NAMES = {ticker: name for name, ticker in MAJOR_INDEXES.items()}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_nse_index_daily(index_display_name, days_back=730):
+    """Best-effort: try NSE's own historical index API for daily OHLC
+    (NSE's index feed is often more complete than Yahoo's for Indian
+    indices). Returns a DataFrame indexed by date with Open/High/Low/Close/
+    Volume, or None on ANY failure -- callers must fall back to Yahoo."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/reports-indices-historical-index-data",
+        }
+        session = requests.Session()
+        session.headers.update(headers)
+        session.get("https://www.nseindia.com", timeout=10)
+
+        to_date = pd.Timestamp.now()
+        from_date = to_date - pd.Timedelta(days=days_back)
+        resp = session.get(
+            "https://www.nseindia.com/api/historicalOR/indicesHistory",
+            params={
+                "indexType": index_display_name,
+                "from": from_date.strftime("%d-%m-%Y"),
+                "to": to_date.strftime("%d-%m-%Y"),
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        records = payload.get("data", {}).get("indexCloseOnlineRecords", [])
+        if not records:
+            return None
+
+        rows = []
+        for r in records:
+            ts = r.get("EOD_TIMESTAMP") or r.get("TIMESTAMP")
+            if not ts:
+                continue
+            rows.append({
+                "Date": pd.to_datetime(ts, dayfirst=True, errors="coerce"),
+                "Open": pd.to_numeric(r.get("EOD_OPEN_INDEX_VAL"), errors="coerce"),
+                "High": pd.to_numeric(r.get("EOD_HIGH_INDEX_VAL"), errors="coerce"),
+                "Low": pd.to_numeric(r.get("EOD_LOW_INDEX_VAL"), errors="coerce"),
+                "Close": pd.to_numeric(r.get("EOD_CLOSE_INDEX_VAL"), errors="coerce"),
+            })
+        df = pd.DataFrame(rows).dropna(subset=["Date", "Close"])
+        if df.empty:
+            return None
+        df = df.set_index("Date").sort_index()
+        df["Volume"] = 0
+        for col in ["Open", "High", "Low"]:
+            df[col] = df[col].fillna(df["Close"])
+        return df
+    except Exception:
+        return None
+
+
 FALLBACK_SYMBOLS = [
     "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "HINDUNILVR", "ITC",
     "SBIN", "BHARTIARTL", "KOTAKBANK", "LT", "AXISBANK", "BAJFINANCE",
@@ -129,6 +196,102 @@ with st.sidebar.expander("Nifty 500 Stocks"):
     else:
         st.caption("No match found.")
         st.caption("No match found.")
+
+st.sidebar.divider()
+st.sidebar.subheader("🛠️ Create Summary")
+st.sidebar.caption(
+    "Upload 2+ Excel files you already downloaded from the Scanner section "
+    "(each for a different timeframe) to compile your own multi-timeframe "
+    "summary -- same format as the dashboard's Summary feature."
+)
+
+_manual_uploaded_files = st.sidebar.file_uploader(
+    "Upload scanner Excel files",
+    type=["xlsx"],
+    accept_multiple_files=True,
+    key="manual_summary_uploads"
+)
+
+_manual_labels = {}
+if _manual_uploaded_files:
+    for _uf in _manual_uploaded_files:
+        _guess = ""
+        if "market_scan_" in _uf.name:
+            try:
+                _guess = _uf.name.split("market_scan_")[1].split("_")[0]
+            except Exception:
+                _guess = ""
+        _manual_labels[_uf.name] = st.sidebar.text_input(
+            f"Timeframe label for '{_uf.name}'",
+            value=_guess,
+            key=f"manual_label_{_uf.name}",
+            help="e.g. 15 Min, 1 Hour, 1 D -- this becomes the column name in the compiled summary."
+        )
+
+_compile_clicked = st.sidebar.button("🧩 Compile Summary", key="compile_manual_summary")
+
+if _compile_clicked:
+    if not _manual_uploaded_files or len(_manual_uploaded_files) < 2:
+        st.sidebar.error("Upload at least 2 Excel files to compile a summary.")
+    else:
+        _manual_idx_summary = None
+        _manual_stocks_summary = None
+        _manual_labels_used = []
+        for _uf in _manual_uploaded_files:
+            _label = (_manual_labels.get(_uf.name) or _uf.name).strip()
+            if not _label:
+                _label = _uf.name
+            _manual_labels_used.append(_label)
+            try:
+                _sheets = pd.read_excel(_uf, sheet_name=None)
+            except Exception as e:
+                st.sidebar.error(f"Could not read '{_uf.name}': {e}. Skipping this file.")
+                continue
+
+            _idx_sheet = _sheets.get("Indexes")
+            if _idx_sheet is not None and "Symbol" in _idx_sheet.columns and "Signal" in _idx_sheet.columns:
+                _piece = _idx_sheet[["Symbol", "Signal"]].rename(columns={"Signal": _label})
+                if _manual_idx_summary is None:
+                    _base_cols = ["Symbol"] + (["Latest Price"] if "Latest Price" in _idx_sheet.columns else [])
+                    _manual_idx_summary = _idx_sheet[_base_cols].merge(_piece, on="Symbol")
+                    if "Yahoo Name" in _idx_sheet.columns:
+                        _manual_idx_summary["Yahoo Name"] = _idx_sheet["Yahoo Name"]
+                    _manual_idx_summary["Category"] = "Index"
+                else:
+                    _manual_idx_summary = _manual_idx_summary.merge(_piece, on="Symbol", how="outer")
+
+            _stk_sheet = _sheets.get("Nifty500_Stocks")
+            if _stk_sheet is not None and "Symbol" in _stk_sheet.columns and "Signal" in _stk_sheet.columns:
+                _piece = _stk_sheet[["Symbol", "Signal"]].rename(columns={"Signal": _label})
+                if _manual_stocks_summary is None:
+                    _base_cols = ["Symbol"] + (["Latest Price"] if "Latest Price" in _stk_sheet.columns else [])
+                    _manual_stocks_summary = _stk_sheet[_base_cols].merge(_piece, on="Symbol")
+                    if "Yahoo Name" in _stk_sheet.columns:
+                        _manual_stocks_summary["Yahoo Name"] = _stk_sheet["Yahoo Name"]
+                    if "Category" in _stk_sheet.columns:
+                        _manual_stocks_summary["Category"] = _stk_sheet["Category"]
+                else:
+                    _manual_stocks_summary = _manual_stocks_summary.merge(_piece, on="Symbol", how="outer")
+
+        _tail_cols = ["Yahoo Name", "Category"]
+        if _manual_idx_summary is not None:
+            _cols = ["Symbol"] + (["Latest Price"] if "Latest Price" in _manual_idx_summary.columns else []) \
+                    + _manual_labels_used + [c for c in _tail_cols if c in _manual_idx_summary.columns]
+            _manual_idx_summary = _manual_idx_summary[[c for c in _cols if c in _manual_idx_summary.columns]]
+            _manual_idx_summary.insert(0, "Sr. No.", range(1, len(_manual_idx_summary) + 1))
+        if _manual_stocks_summary is not None:
+            _cols = ["Symbol"] + (["Latest Price"] if "Latest Price" in _manual_stocks_summary.columns else []) \
+                    + _manual_labels_used + [c for c in _tail_cols if c in _manual_stocks_summary.columns]
+            _manual_stocks_summary = _manual_stocks_summary[[c for c in _cols if c in _manual_stocks_summary.columns]]
+            _manual_stocks_summary.insert(0, "Sr. No.", range(1, len(_manual_stocks_summary) + 1))
+
+        if _manual_idx_summary is None and _manual_stocks_summary is None:
+            st.sidebar.error("None of the uploaded files looked like valid Scanner exports (missing 'Symbol'/'Signal' columns).")
+        else:
+            st.session_state.manual_summary_index_df = _manual_idx_summary
+            st.session_state.manual_summary_stocks_df = _manual_stocks_summary
+            st.session_state.manual_summary_labels = _manual_labels_used
+            st.sidebar.success("Compiled! Scroll down to 'Create Summary' results on the main page.")
 
 # Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
 # We fetch the closest available candle size and combine ("resample")
@@ -245,12 +408,22 @@ def get_company_name(sym):
 def fetch_data(symbol, interval):
     cfg = INTERVAL_CONFIG[interval]
 
-    data = yf.download(
-        tickers=symbol,
-        period=cfg["period"],
-        interval=cfg["yf_interval"],
-        progress=False
-    )
+    # Best-of-both: for daily-interval index symbols, try NSE's own index
+    # history first (it's often more complete than Yahoo's for Indian
+    # indices) -- fall straight through to Yahoo on any failure.
+    data = None
+    if interval == "1d" and symbol in INDEX_NSE_NAMES:
+        nse_data = fetch_nse_index_daily(INDEX_NSE_NAMES[symbol])
+        if nse_data is not None and len(nse_data) > 30:
+            data = nse_data
+
+    if data is None:
+        data = yf.download(
+            tickers=symbol,
+            period=cfg["period"],
+            interval=cfg["yf_interval"],
+            progress=False
+        )
 
     if data.empty:
         return data
@@ -969,9 +1142,12 @@ if run_scanner_clicked:
     st.session_state.scanner_interval_used = scanner_interval
 
 
-SUMMARY_TIMEFRAMES = [
+SUMMARY_TIMEFRAMES_INDEXES = [
     ("30 Min", "30m"), ("1 Hour", "1h"), ("2 Hour", "2h"), ("3 Hour", "3h"),
     ("4 Hour", "4h"), ("1 D", "1d"), ("1 W", "1wk"), ("1 M", "1mo"),
+]
+SUMMARY_TIMEFRAMES_STOCKS = [
+    ("1 Hour", "1h"), ("1 D", "1d"), ("1 W", "1wk"), ("1 M", "1mo"),
 ]
 
 if run_summary_clicked:
@@ -989,7 +1165,7 @@ if run_summary_clicked:
 
     # ---- Indexes: one column of Signal per timeframe ----
     idx_summary = None
-    for i, (label, tf) in enumerate(SUMMARY_TIMEFRAMES):
+    for i, (label, tf) in enumerate(SUMMARY_TIMEFRAMES_INDEXES):
         with st.spinner(f"Scanning indexes — {label} timeframe..."):
             tf_df = scan_symbols(index_symbols_sum, yf_suffix="", interval=tf)
         if tf_df.empty:
@@ -999,7 +1175,7 @@ if run_summary_clicked:
             idx_summary = tf_df[["Symbol", "Latest Price"]].merge(piece, on="Symbol")
         else:
             idx_summary = idx_summary.merge(piece, on="Symbol", how="outer")
-        if i < len(SUMMARY_TIMEFRAMES) - 1:
+        if i < len(SUMMARY_TIMEFRAMES_INDEXES) - 1:
             time.sleep(3)  # brief pause between bursts so Yahoo doesn't rate-limit the next one
     if idx_summary is not None:
         name_map_sum = dict(zip(index_symbols_sum, index_names_sum))
@@ -1013,8 +1189,8 @@ if run_summary_clicked:
     stocks_summary = None
     _missed_symbols_by_tf = {}
     _progress_area = st.empty()
-    for i, (label, tf) in enumerate(SUMMARY_TIMEFRAMES):
-        _progress_area.info(f"Timeframe {i + 1} of {len(SUMMARY_TIMEFRAMES)}: {label} — scanning Nifty 500 stocks...")
+    for i, (label, tf) in enumerate(SUMMARY_TIMEFRAMES_STOCKS):
+        _progress_area.info(f"Timeframe {i + 1} of {len(SUMMARY_TIMEFRAMES_STOCKS)}: {label} — scanning Nifty 500 stocks...")
         with st.spinner(f"Scanning Nifty 500 stocks — {label} timeframe (this can take a few minutes)..."):
             tf_df = scan_symbols(nifty500_sum, yf_suffix=".NS", interval=tf)
         missing_count = len(nifty500_sum) - len(tf_df)
@@ -1029,13 +1205,13 @@ if run_summary_clicked:
             # Save progress after EVERY timeframe, not just at the end -- so
             # nothing is lost even if a later timeframe gets rate-limited.
             st.session_state.summary_stocks_df = stocks_summary
-        if i < len(SUMMARY_TIMEFRAMES) - 1:
+        if i < len(SUMMARY_TIMEFRAMES_STOCKS) - 1:
             _progress_area.info(
-                f"Timeframe {i + 1} of {len(SUMMARY_TIMEFRAMES)} done ({label}). "
-                f"Pausing ~35s before the next one so Yahoo Finance doesn't rate-limit it "
+                f"Timeframe {i + 1} of {len(SUMMARY_TIMEFRAMES_STOCKS)} done ({label}). "
+                f"Pausing ~50s before the next one so Yahoo Finance doesn't rate-limit it "
                 f"(mirrors the gap that happens naturally between manual scans)..."
             )
-            time.sleep(35)
+            time.sleep(50)
     _progress_area.empty()
     if _missed_symbols_by_tf:
         st.warning(
@@ -1051,7 +1227,7 @@ if run_summary_clicked:
         )
         stocks_summary["Yahoo Name"] = stocks_summary["Symbol"] + ".NS"
         stocks_summary["Symbol"] = stocks_summary["Symbol"].map(nifty500_names_sum).fillna(stocks_summary["Symbol"])
-        _tf_cols = [label for label, _ in SUMMARY_TIMEFRAMES]
+        _tf_cols = [label for label, _ in SUMMARY_TIMEFRAMES_STOCKS]
         for _c in _tf_cols:  # a fully-failed timeframe never got merged in -- add it as blank
             if _c not in stocks_summary.columns:
                 stocks_summary[_c] = None
@@ -1175,7 +1351,7 @@ if st.session_state.summary_index_df is not None and not st.session_state.summar
     # ---- Download the summary as a single Excel file with 2 sheets ----
     from openpyxl.styles import Font as _SummaryFont
 
-    _summary_tf_cols = [label for label, _ in SUMMARY_TIMEFRAMES]
+    _summary_tf_cols = [label for label, _ in SUMMARY_TIMEFRAMES_INDEXES]
 
     def _color_code_summary_sheet(worksheet, df):
         """Each of the 8 timeframe columns gets its OWN cell colored by its
@@ -1209,6 +1385,79 @@ if st.session_state.summary_index_df is not None and not st.session_state.summar
     )
 elif run_summary_clicked:
     st.warning("Summary scan didn't return any data -- try again.")
+
+
+# ---------- Manually-compiled summary (from files uploaded in the sidebar) ----------
+if st.session_state.manual_summary_index_df is not None or st.session_state.manual_summary_stocks_df is not None:
+    st.divider()
+    st.subheader("🧩 Create Summary — compiled from your uploaded files")
+    st.caption("Timeframes used: " + ", ".join(st.session_state.manual_summary_labels or []))
+
+    _man_tab_all, _man_tab_idx, _man_tab_stocks = st.tabs(["All", "Indexes", "Nifty 500 Stocks"])
+
+    _man_idx_display = None
+    if st.session_state.manual_summary_index_df is not None:
+        _man_idx_display = st.session_state.manual_summary_index_df.copy()
+        _man_idx_display["Symbol"] = _man_idx_display["Symbol"].apply(shorten_name)
+    _man_stocks_display = None
+    if st.session_state.manual_summary_stocks_df is not None:
+        _man_stocks_display = st.session_state.manual_summary_stocks_df.copy()
+        _man_stocks_display["Symbol"] = _man_stocks_display["Symbol"].apply(shorten_name)
+
+    with _man_tab_idx:
+        if _man_idx_display is not None:
+            render_pinned_table(_man_idx_display, ["Sr. No.", "Symbol"], pin_widths=[48, 170])
+        else:
+            st.caption("No index data found in the uploaded files.")
+
+    with _man_tab_stocks:
+        if _man_stocks_display is not None:
+            render_pinned_table(_man_stocks_display, ["Sr. No.", "Symbol"], pin_widths=[48, 170])
+        else:
+            st.caption("No Nifty 500 stock data found in the uploaded files.")
+
+    with _man_tab_all:
+        if _man_idx_display is not None:
+            st.write("**Indexes**")
+            render_pinned_table(_man_idx_display, ["Sr. No.", "Symbol"], pin_widths=[48, 170])
+        if _man_stocks_display is not None:
+            st.write("**Nifty 500 Stocks**")
+            render_pinned_table(_man_stocks_display, ["Sr. No.", "Symbol"], pin_widths=[48, 170])
+
+    # ---- Download the compiled summary as a single Excel file ----
+    from openpyxl.styles import Font as _ManualFont
+
+    def _color_code_manual_sheet(worksheet, df, tf_cols):
+        col_positions = {name: i + 1 for i, name in enumerate(df.columns)}
+        tf_col_idxs = [col_positions[c] for c in tf_cols if c in col_positions]
+        sr_no_idx = col_positions.get("Sr. No.")
+        for row_idx in range(2, len(df) + 2):
+            for col_idx in tf_col_idxs:
+                cell = worksheet.cell(row=row_idx, column=col_idx)
+                color = SIGNAL_COLORS_EXCEL.get(cell.value, "#000000").lstrip("#")
+                cell.font = _ManualFont(color=color)
+            if sr_no_idx:
+                worksheet.cell(row=row_idx, column=sr_no_idx).number_format = "0"
+
+    _manual_excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(_manual_excel_buffer, engine="openpyxl") as writer:
+        if st.session_state.manual_summary_index_df is not None:
+            st.session_state.manual_summary_index_df.to_excel(writer, sheet_name="Indexes", index=False)
+            _color_code_manual_sheet(writer.sheets["Indexes"], st.session_state.manual_summary_index_df,
+                                      st.session_state.manual_summary_labels or [])
+        if st.session_state.manual_summary_stocks_df is not None:
+            st.session_state.manual_summary_stocks_df.to_excel(writer, sheet_name="Nifty500_Stocks", index=False)
+            _color_code_manual_sheet(writer.sheets["Nifty500_Stocks"], st.session_state.manual_summary_stocks_df,
+                                      st.session_state.manual_summary_labels or [])
+    _manual_excel_buffer.seek(0)
+
+    st.download_button(
+        label="⬇️ Download Compiled Summary Excel",
+        data=_manual_excel_buffer,
+        file_name=f"compiled_summary_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_manual_summary"
+    )
 
 
 # ---------- Live loop ----------
