@@ -197,6 +197,40 @@ with st.sidebar.expander("Nifty 500 Stocks"):
         st.caption("No match found.")
         st.caption("No match found.")
 
+# Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
+# We fetch the closest available candle size and combine ("resample")
+# it into the requested duration ourselves.
+INTERVAL_CONFIG = {
+    "1m":  {"yf_interval": "1m",  "period": "7d",   "resample": None},
+    "5m":  {"yf_interval": "5m",  "period": "60d",  "resample": None},
+    "10m": {"yf_interval": "5m",  "period": "60d",  "resample": "10min"},
+    "15m": {"yf_interval": "15m", "period": "60d",  "resample": None},
+    "30m": {"yf_interval": "30m", "period": "60d",  "resample": None},
+    "1h":  {"yf_interval": "60m", "period": "730d", "resample": None},
+    "2h":  {"yf_interval": "60m", "period": "730d", "resample": "2h"},
+    "3h":  {"yf_interval": "60m", "period": "730d", "resample": "3h"},
+    "4h":  {"yf_interval": "60m", "period": "730d", "resample": "4h"},
+    "1d":  {"yf_interval": "1d",  "period": "10y",  "resample": None},
+    "1wk": {"yf_interval": "1wk", "period": "max",  "resample": None},
+    "1mo": {"yf_interval": "1mo", "period": "max",  "resample": None},
+}
+
+interval = st.sidebar.selectbox(
+    "Candle Interval",
+    options=list(INTERVAL_CONFIG.keys()),
+    index=list(INTERVAL_CONFIG.keys()).index("1d")
+)
+refresh_seconds = st.sidebar.number_input(
+    "Auto-refresh every (seconds)",
+    min_value=10, max_value=300, value=30
+)
+num_bars = st.sidebar.slider(
+    "Candles to show on chart",
+    min_value=30, max_value=300, value=45,
+    help="Fewer candles = cleaner, less zig-zag chart (like TradingView's default zoomed view)"
+)
+run = st.sidebar.checkbox("Start Live Updates", value=True)
+
 st.sidebar.divider()
 st.sidebar.subheader("🛠️ Create Summary")
 st.sidebar.caption(
@@ -292,40 +326,6 @@ if _compile_clicked:
             st.session_state.manual_summary_stocks_df = _manual_stocks_summary
             st.session_state.manual_summary_labels = _manual_labels_used
             st.sidebar.success("Compiled! Scroll down to 'Create Summary' results on the main page.")
-
-# Yahoo Finance does not natively provide 10m / 2h / 3h / 4h candles.
-# We fetch the closest available candle size and combine ("resample")
-# it into the requested duration ourselves.
-INTERVAL_CONFIG = {
-    "1m":  {"yf_interval": "1m",  "period": "7d",   "resample": None},
-    "5m":  {"yf_interval": "5m",  "period": "60d",  "resample": None},
-    "10m": {"yf_interval": "5m",  "period": "60d",  "resample": "10min"},
-    "15m": {"yf_interval": "15m", "period": "60d",  "resample": None},
-    "30m": {"yf_interval": "30m", "period": "60d",  "resample": None},
-    "1h":  {"yf_interval": "60m", "period": "730d", "resample": None},
-    "2h":  {"yf_interval": "60m", "period": "730d", "resample": "2h"},
-    "3h":  {"yf_interval": "60m", "period": "730d", "resample": "3h"},
-    "4h":  {"yf_interval": "60m", "period": "730d", "resample": "4h"},
-    "1d":  {"yf_interval": "1d",  "period": "10y",  "resample": None},
-    "1wk": {"yf_interval": "1wk", "period": "max",  "resample": None},
-    "1mo": {"yf_interval": "1mo", "period": "max",  "resample": None},
-}
-
-interval = st.sidebar.selectbox(
-    "Candle Interval",
-    options=list(INTERVAL_CONFIG.keys()),
-    index=list(INTERVAL_CONFIG.keys()).index("1d")
-)
-refresh_seconds = st.sidebar.number_input(
-    "Auto-refresh every (seconds)",
-    min_value=10, max_value=300, value=30
-)
-num_bars = st.sidebar.slider(
-    "Candles to show on chart",
-    min_value=30, max_value=300, value=45,
-    help="Fewer candles = cleaner, less zig-zag chart (like TradingView's default zoomed view)"
-)
-run = st.sidebar.checkbox("Start Live Updates", value=True)
 
 
 # ---------- Indicator functions ----------
